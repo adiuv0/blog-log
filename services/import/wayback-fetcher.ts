@@ -48,28 +48,69 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Normalize a feed URL: ensure HTTPS, follow known redirects, etc.
+ */
+function normalizeFeedUrl(url: string): string {
+  let normalized = url.trim();
+  // Ensure protocol
+  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+    normalized = "https://" + normalized;
+  }
+  // Upgrade HTTP to HTTPS for known hosts
+  normalized = normalized.replace(/^http:\/\//i, "https://");
+  return normalized;
+}
+
 async function fetchWithRetry(
   url: string,
   maxRetries = 3
 ): Promise<Response | null> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "BlogLog/1.0 (RSS Reader)",
+          "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        },
+        redirect: "follow",
+      });
       if (response.status === 429) {
         // Rate limited — back off exponentially
         const backoff = RATE_LIMIT_MS * Math.pow(2, attempt + 1);
         await sleep(backoff);
         continue;
       }
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.warn(`[BlogLog] fetch ${url} returned ${response.status}`);
+        return null;
+      }
       return response;
-    } catch {
+    } catch (err) {
+      console.warn(`[BlogLog] fetch attempt ${attempt + 1} failed for ${url}:`, err);
       if (attempt < maxRetries - 1) {
         await sleep(RATE_LIMIT_MS * Math.pow(2, attempt));
       }
     }
   }
   return null;
+}
+
+/**
+ * Safely parse RSS/Atom feed text. Wraps react-native-rss-parser with
+ * protection against oversized feeds that could crash the parser.
+ */
+async function safeParseFeed(text: string): Promise<rssParser.Feed | null> {
+  try {
+    // Limit feed text to 5MB to prevent parser OOM on huge Substack feeds
+    const MAX_FEED_SIZE = 5 * 1024 * 1024;
+    const feedText = text.length > MAX_FEED_SIZE ? text.substring(0, MAX_FEED_SIZE) : text;
+    const feed = await rssParser.parse(feedText);
+    return feed;
+  } catch (err) {
+    console.warn("[BlogLog] RSS parse error:", err);
+    return null;
+  }
 }
 
 /**
@@ -105,6 +146,33 @@ type DiscoveredPost = {
 };
 
 /**
+ * Safely extract posts from a parsed feed.
+ */
+function extractPostsFromFeed(feed: rssParser.Feed): DiscoveredPost[] {
+  if (!feed.items || !Array.isArray(feed.items)) return [];
+
+  return feed.items
+    .map((item) => {
+      try {
+        return {
+          title: (item.title ?? "Untitled").trim(),
+          link: item.links?.[0]?.url ?? item.id ?? "",
+          pubdate: item.published ?? null,
+          author: item.authors?.[0]?.name ?? null,
+          categories:
+            (item.categories
+              ?.map((c) => c.name)
+              .filter((n): n is string => typeof n === "string" && n.length > 0)) ?? [],
+          description: item.description ?? null,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((p): p is DiscoveredPost => p !== null && p.link !== "");
+}
+
+/**
  * Fetch and parse an archived RSS feed snapshot to discover posts.
  */
 async function fetchFeedSnapshot(
@@ -117,16 +185,9 @@ async function fetchFeedSnapshot(
 
   try {
     const text = await response.text();
-    const feed = await rssParser.parse(text);
-
-    return feed.items.map((item) => ({
-      title: item.title ?? "Untitled",
-      link: item.links?.[0]?.url ?? item.id ?? "",
-      pubdate: item.published ?? null,
-      author: item.authors?.[0]?.name ?? null,
-      categories: item.categories?.map((c) => c.name).filter(Boolean) as string[] ?? [],
-      description: item.description ?? null,
-    }));
+    const feed = await safeParseFeed(text);
+    if (!feed) return [];
+    return extractPostsFromFeed(feed);
   } catch {
     return [];
   }
@@ -134,6 +195,7 @@ async function fetchFeedSnapshot(
 
 /**
  * Fetch the current (live) RSS feed to get blog metadata and recent posts.
+ * Follows redirects and handles various feed formats.
  */
 async function fetchCurrentFeed(feedUrl: string) {
   const response = await fetchWithRetry(feedUrl);
@@ -141,21 +203,31 @@ async function fetchCurrentFeed(feedUrl: string) {
 
   try {
     const text = await response.text();
-    const feed = await rssParser.parse(text);
+
+    // Verify we actually got XML/RSS content, not an HTML error page
+    const trimmed = text.trimStart();
+    if (
+      !trimmed.startsWith("<?xml") &&
+      !trimmed.startsWith("<rss") &&
+      !trimmed.startsWith("<feed") &&
+      !trimmed.startsWith("<!DOCTYPE") // some feeds start with DOCTYPE
+    ) {
+      // Might be an HTML redirect page or error page
+      console.warn("[BlogLog] Feed response does not look like XML, first 200 chars:", trimmed.substring(0, 200));
+      return null;
+    }
+
+    const feed = await safeParseFeed(text);
+    if (!feed) return null;
+
     return {
       title: feed.title ?? "Unknown Blog",
       description: feed.description ?? null,
       siteUrl: feed.links?.[0]?.url ?? null,
-      items: feed.items.map((item) => ({
-        title: item.title ?? "Untitled",
-        link: item.links?.[0]?.url ?? item.id ?? "",
-        pubdate: item.published ?? null,
-        author: item.authors?.[0]?.name ?? null,
-        categories: item.categories?.map((c) => c.name).filter(Boolean) as string[] ?? [],
-        description: item.description ?? null,
-      })),
+      items: extractPostsFromFeed(feed),
     };
-  } catch {
+  } catch (err) {
+    console.warn("[BlogLog] fetchCurrentFeed error:", err);
     return null;
   }
 }
@@ -169,6 +241,9 @@ export async function importFromWayback(
   feedUrl: string,
   onProgress?: ProgressCallback
 ): Promise<string | null> {
+  // Normalize the URL (add protocol, upgrade to HTTPS)
+  const normalizedUrl = normalizeFeedUrl(feedUrl);
+
   const blogId = generateId();
   const jobId = generateId();
   const now = new Date().toISOString();
@@ -176,36 +251,70 @@ export async function importFromWayback(
   // Step 1: Fetch current feed for metadata
   onProgress?.({ phase: "metadata", total: 0, imported: 0, message: "Fetching current feed..." });
 
-  const currentFeed = await fetchCurrentFeed(feedUrl);
+  let currentFeed: Awaited<ReturnType<typeof fetchCurrentFeed>> = null;
+  try {
+    currentFeed = await fetchCurrentFeed(normalizedUrl);
+  } catch (err) {
+    console.warn("[BlogLog] fetchCurrentFeed threw:", err);
+    throw new Error(
+      "Could not fetch the RSS feed. Please check the URL and your internet connection."
+    );
+  }
+
   if (!currentFeed) {
-    throw new Error("Could not fetch the RSS feed. Please check the URL.");
+    throw new Error(
+      "Could not fetch or parse the RSS feed. Please check the URL is a valid RSS/Atom feed."
+    );
+  }
+
+  if (currentFeed.items.length === 0) {
+    throw new Error(
+      "The feed was fetched but contains no articles. It may be empty or in an unsupported format."
+    );
   }
 
   // Create blog entry
-  await db.insert(blogs).values({
-    id: blogId,
-    title: currentFeed.title,
-    description: currentFeed.description,
-    feedUrl,
-    siteUrl: currentFeed.siteUrl,
-    importedAt: now,
-    importSource: "wayback",
-  });
+  try {
+    await db.insert(blogs).values({
+      id: blogId,
+      title: currentFeed.title,
+      description: currentFeed.description,
+      feedUrl: normalizedUrl,
+      siteUrl: currentFeed.siteUrl,
+      importedAt: now,
+      importSource: "wayback",
+    });
+  } catch (err) {
+    console.error("[BlogLog] Failed to insert blog:", err);
+    throw new Error("Failed to save blog to database.");
+  }
 
   // Create import job
-  await db.insert(importJobs).values({
-    id: jobId,
-    blogId,
-    source: "wayback",
-    state: "running",
-    phase: "metadata",
-    startedAt: now,
-  });
+  try {
+    await db.insert(importJobs).values({
+      id: jobId,
+      blogId,
+      source: "wayback",
+      state: "running",
+      phase: "metadata",
+      startedAt: now,
+    });
+  } catch (err) {
+    console.error("[BlogLog] Failed to create import job:", err);
+    // Non-fatal — continue without job tracking
+  }
 
   // Step 2: Discover all posts from Wayback CDX
   onProgress?.({ phase: "metadata", total: 0, imported: 0, message: "Querying Wayback Machine for historical snapshots..." });
 
-  const snapshots = await fetchCdxSnapshots(feedUrl);
+  let snapshots: string[] = [];
+  try {
+    snapshots = await fetchCdxSnapshots(normalizedUrl);
+  } catch (err) {
+    console.warn("[BlogLog] CDX snapshot fetch failed:", err);
+    // Non-fatal — continue with just the current feed posts
+  }
+
   const allPosts = new Map<string, DiscoveredPost>();
 
   // Add current feed posts first
@@ -216,29 +325,43 @@ export async function importFromWayback(
   }
 
   // Process each historical snapshot
-  onProgress?.({
-    phase: "metadata",
-    total: snapshots.length,
-    imported: 0,
-    message: `Found ${snapshots.length} archived snapshots. Discovering posts...`,
-  });
-
-  for (let i = 0; i < snapshots.length; i++) {
-    const posts = await fetchFeedSnapshot(feedUrl, snapshots[i]);
-    for (const post of posts) {
-      if (post.link && !allPosts.has(post.link)) {
-        allPosts.set(post.link, post);
-      }
-    }
-
+  if (snapshots.length > 0) {
     onProgress?.({
       phase: "metadata",
       total: snapshots.length,
-      imported: i + 1,
-      message: `Processed ${i + 1}/${snapshots.length} snapshots. Found ${allPosts.size} unique posts.`,
+      imported: 0,
+      message: `Found ${snapshots.length} archived snapshots. Discovering posts...`,
     });
 
-    await sleep(RATE_LIMIT_MS);
+    for (let i = 0; i < snapshots.length; i++) {
+      try {
+        const posts = await fetchFeedSnapshot(normalizedUrl, snapshots[i]);
+        for (const post of posts) {
+          if (post.link && !allPosts.has(post.link)) {
+            allPosts.set(post.link, post);
+          }
+        }
+      } catch (err) {
+        console.warn(`[BlogLog] Snapshot ${i} parse error:`, err);
+        // Continue with other snapshots
+      }
+
+      onProgress?.({
+        phase: "metadata",
+        total: snapshots.length,
+        imported: i + 1,
+        message: `Processed ${i + 1}/${snapshots.length} snapshots. Found ${allPosts.size} unique posts.`,
+      });
+
+      await sleep(RATE_LIMIT_MS);
+    }
+  } else {
+    onProgress?.({
+      phase: "metadata",
+      total: 0,
+      imported: 0,
+      message: `No Wayback snapshots found. Importing ${allPosts.size} posts from current feed...`,
+    });
   }
 
   // Step 3: Insert all discovered posts into the database
@@ -260,7 +383,15 @@ export async function importFromWayback(
     try {
       for (const post of batch) {
         const articleId = generateId();
-        const contentText = post.description ? stripHtml(post.description) : null;
+
+        // Safely extract content text from description
+        let contentText: string | null = null;
+        try {
+          contentText = post.description ? stripHtml(post.description) : null;
+        } catch {
+          contentText = null;
+        }
+
         const words = contentText ? countWords(contentText) : 0;
 
         db.$client.runSync(
@@ -269,39 +400,51 @@ export async function importFromWayback(
           [
             articleId,
             blogId,
-            post.title,
+            post.title || "Untitled",
             post.link,
-            post.author,
-            post.pubdate,
+            post.author ?? null,
+            post.pubdate ?? null,
             contentText,
             words,
-            Math.ceil(words / ReadingSpeed.wordsPerMinute),
+            Math.max(1, Math.ceil(words / ReadingSpeed.wordsPerMinute)),
             contentText && contentText.length > 200 ? 1 : 0,
             now,
           ]
         );
 
-        // Insert tags
+        // Insert tags (each in its own try-catch so one bad tag doesn't kill the batch)
         for (const tag of post.categories) {
-          db.$client.runSync(
-            `INSERT INTO article_tags (article_id, tag) VALUES (?, ?)`,
-            [articleId, tag]
-          );
+          try {
+            db.$client.runSync(
+              `INSERT OR IGNORE INTO article_tags (article_id, tag) VALUES (?, ?)`,
+              [articleId, tag]
+            );
+          } catch {
+            // Skip bad tag
+          }
         }
 
         // Populate FTS index
         if (contentText) {
-          db.$client.runSync(
-            `INSERT INTO articles_fts (rowid, title, content_text)
-             SELECT rowid, title, content_text FROM articles WHERE id = ?`,
-            [articleId]
-          );
+          try {
+            db.$client.runSync(
+              `INSERT INTO articles_fts (rowid, title, content_text)
+               SELECT rowid, title, content_text FROM articles WHERE id = ?`,
+              [articleId]
+            );
+          } catch {
+            // FTS insert failure is non-fatal
+          }
         }
       }
       db.$client.execSync("COMMIT");
     } catch (err) {
-      db.$client.execSync("ROLLBACK");
-      console.error("Batch import error:", err);
+      try {
+        db.$client.execSync("ROLLBACK");
+      } catch {
+        // Rollback failed — DB state might be inconsistent
+      }
+      console.error("[BlogLog] Batch import error:", err);
     }
 
     imported += batch.length;
@@ -314,38 +457,46 @@ export async function importFromWayback(
   }
 
   // Update blog post count and date range
-  const countResult = db.$client.getFirstSync(
-    `SELECT COUNT(*) as count, MIN(pubdate) as earliest, MAX(pubdate) as latest
-     FROM articles WHERE blog_id = ?`,
-    [blogId]
-  ) as { count: number; earliest: string | null; latest: string | null } | null;
+  try {
+    const countResult = db.$client.getFirstSync(
+      `SELECT COUNT(*) as count, MIN(pubdate) as earliest, MAX(pubdate) as latest
+       FROM articles WHERE blog_id = ?`,
+      [blogId]
+    ) as { count: number; earliest: string | null; latest: string | null } | null;
 
-  const totalWords = db.$client.getFirstSync(
-    `SELECT COALESCE(SUM(word_count), 0) as total FROM articles WHERE blog_id = ?`,
-    [blogId]
-  ) as { total: number } | null;
+    const totalWords = db.$client.getFirstSync(
+      `SELECT COALESCE(SUM(word_count), 0) as total FROM articles WHERE blog_id = ?`,
+      [blogId]
+    ) as { total: number } | null;
 
-  await db
-    .update(blogs)
-    .set({
-      postCount: countResult?.count ?? 0,
-      earliestDate: countResult?.earliest,
-      latestDate: countResult?.latest,
-      totalWordCount: totalWords?.total ?? 0,
-    })
-    .where(eq(blogs.id, blogId));
+    await db
+      .update(blogs)
+      .set({
+        postCount: countResult?.count ?? 0,
+        earliestDate: countResult?.earliest,
+        latestDate: countResult?.latest,
+        totalWordCount: totalWords?.total ?? 0,
+      })
+      .where(eq(blogs.id, blogId));
+  } catch (err) {
+    console.error("[BlogLog] Failed to update blog metadata:", err);
+  }
 
   // Update import job
-  await db
-    .update(importJobs)
-    .set({
-      state: "completed",
-      phase: "metadata",
-      totalItems: posts.length,
-      importedItems: imported,
-      completedAt: new Date().toISOString(),
-    })
-    .where(eq(importJobs.id, jobId));
+  try {
+    await db
+      .update(importJobs)
+      .set({
+        state: "completed",
+        phase: "metadata",
+        totalItems: posts.length,
+        importedItems: imported,
+        completedAt: new Date().toISOString(),
+      })
+      .where(eq(importJobs.id, jobId));
+  } catch (err) {
+    console.error("[BlogLog] Failed to update import job:", err);
+  }
 
   onProgress?.({
     phase: "metadata",

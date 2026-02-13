@@ -38,6 +38,7 @@ export default function ImportScreen() {
     if (!rssUrl.trim()) return;
     setIsImporting(true);
     setProgressMessage("Starting import...");
+    setProgressPercent(0);
 
     try {
       const blogId = await importFromWayback(rssUrl.trim(), (progress) => {
@@ -52,7 +53,8 @@ export default function ImportScreen() {
         router.back();
       }
     } catch (err) {
-      Alert.alert("Import Failed", String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert("Import Failed", message);
     } finally {
       setIsImporting(false);
     }
@@ -68,7 +70,8 @@ export default function ImportScreen() {
       setH4fFeeds(feeds.map((f) => ({ id: f.id, title: f.title })));
       setIsImporting(false);
     } catch (err) {
-      Alert.alert("Connection Failed", "Could not connect to the History4Feed instance. Check the URL.");
+      const message = err instanceof Error ? err.message : "Could not connect to the History4Feed instance. Check the URL.";
+      Alert.alert("Connection Failed", message);
       setIsImporting(false);
     }
   };
@@ -88,7 +91,8 @@ export default function ImportScreen() {
         router.back();
       }
     } catch (err) {
-      Alert.alert("Import Failed", String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert("Import Failed", message);
     } finally {
       setIsImporting(false);
     }
@@ -117,7 +121,8 @@ export default function ImportScreen() {
         router.back();
       }
     } catch (err) {
-      Alert.alert("Import Failed", String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert("Import Failed", message);
     } finally {
       setIsImporting(false);
     }
