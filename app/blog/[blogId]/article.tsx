@@ -5,7 +5,6 @@ import {
   StyleSheet,
   Pressable,
   useColorScheme,
-  Alert,
 } from "react-native";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { WebView } from "react-native-webview";
@@ -29,15 +28,18 @@ export default function ArticleScreen() {
   const endSession = useEndReadingSession();
 
   const sessionIdRef = useRef<number | null>(null);
+  const hasStartedRef = useRef(false);
   const [loadError, setLoadError] = useState(false);
   const [hasReachedBottom, setHasReachedBottom] = useState(false);
   const [isMarkedRead, setIsMarkedRead] = useState(false);
+  const [waybackUrl, setWaybackUrl] = useState<string | null>(null);
 
   const articleUrl = link ? decodeURIComponent(link) : article?.link ?? "";
 
-  // Start reading session
+  // Start reading session (guard with ref to prevent double-fire in StrictMode)
   useEffect(() => {
-    if (!articleId) return;
+    if (!articleId || hasStartedRef.current) return;
+    hasStartedRef.current = true;
 
     // Mark as in_progress
     updateStatus.mutate({ articleId, status: "in_progress" });
@@ -51,6 +53,7 @@ export default function ArticleScreen() {
         endSession.mutate(sessionIdRef.current);
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [articleId]);
 
   const handleMarkAsRead = () => {
@@ -86,24 +89,8 @@ export default function ArticleScreen() {
     setLoadError(true);
   };
 
-  const showCachedVersion = () => {
-    setLoadError(false);
-    // Will render offline version below
-  };
-
-  const showWaybackVersion = () => {
-    if (articleUrl) {
-      setLoadError(false);
-      // Rewrite URL to Wayback Machine
-    }
-  };
-
   // Build the WebView URL
-  let displayUrl = articleUrl;
-  if (loadError && article?.contentHtml) {
-    // Show offline content
-    displayUrl = "";
-  }
+  const displayUrl = waybackUrl ?? (loadError ? "" : articleUrl);
 
   return (
     <>
@@ -149,7 +136,7 @@ export default function ArticleScreen() {
                 style={[styles.waybackButton, { backgroundColor: colors.primary }]}
                 onPress={() => {
                   setLoadError(false);
-                  displayUrl = `https://web.archive.org/web/*/${articleUrl}`;
+                  setWaybackUrl(`https://web.archive.org/web/*/${articleUrl}`);
                 }}
               >
                 <Text style={styles.waybackButtonText}>Try Wayback Machine</Text>
