@@ -3,8 +3,12 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useColorScheme, View, Text, ActivityIndicator, StyleSheet } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { initializeDatabase } from "../db/client";
 import { Colors } from "../constants/theme";
+import { ImportProvider } from "../contexts/ImportContext";
+import { importManager } from "../services/import/import-manager";
+import { ImportProgressBanner } from "../components/ImportProgressBanner";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -22,7 +26,10 @@ export default function RootLayout() {
 
   useEffect(() => {
     initializeDatabase()
-      .then(() => setDbReady(true))
+      .then(() => {
+        setDbReady(true);
+        importManager.setQueryClient(queryClient);
+      })
       .catch((err) => {
         console.error("Database init failed:", err);
         setDbError(String(err));
@@ -54,33 +61,38 @@ export default function RootLayout() {
   }
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <StatusBar style="auto" />
-      <Stack
-        screenOptions={{
-          headerStyle: { backgroundColor: colors.surface },
-          headerTintColor: colors.text,
-          contentStyle: { backgroundColor: colors.background },
-        }}
-      >
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen
-          name="blog/[blogId]/index"
-          options={{ title: "Articles" }}
-        />
-        <Stack.Screen
-          name="blog/[blogId]/article"
-          options={{ title: "Reading", headerShown: false }}
-        />
-        <Stack.Screen
-          name="import/index"
-          options={{
-            title: "Import Blog",
-            presentation: "modal",
-          }}
-        />
-      </Stack>
-    </QueryClientProvider>
+    <SafeAreaProvider>
+      <QueryClientProvider client={queryClient}>
+        <ImportProvider>
+          <StatusBar style="auto" />
+          <ImportProgressBanner />
+          <Stack
+            screenOptions={{
+              headerStyle: { backgroundColor: colors.surface },
+              headerTintColor: colors.text,
+              contentStyle: { backgroundColor: colors.background },
+            }}
+          >
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen
+              name="blog/[blogId]/index"
+              options={{ title: "Articles" }}
+            />
+            <Stack.Screen
+              name="blog/[blogId]/article"
+              options={{ title: "Reading", headerShown: false }}
+            />
+            <Stack.Screen
+              name="import/index"
+              options={{
+                title: "Import Blog",
+                presentation: "modal",
+              }}
+            />
+          </Stack>
+        </ImportProvider>
+      </QueryClientProvider>
+    </SafeAreaProvider>
   );
 }
 

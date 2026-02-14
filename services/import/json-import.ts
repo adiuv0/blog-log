@@ -3,40 +3,7 @@ import { db } from "../../db/client";
 import { blogs, articles, articleTags, importJobs } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { ReadingSpeed } from "../../constants/theme";
-
-type ProgressCallback = (progress: {
-  phase: string;
-  total: number;
-  imported: number;
-  message: string;
-}) => void;
-
-function generateId(): string {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function countWords(text: string): number {
-  return text.split(/\s+/).filter((w) => w.length > 0).length;
-}
+import { generateId, stripHtml, countWords, type ProgressCallback } from "./utils";
 
 /**
  * Expected JSON format: History4Feed API response format
@@ -156,6 +123,7 @@ export async function importFromJsonFile(
     total: posts.length,
     imported: 0,
     message: `Found ${posts.length} articles. Importing...`,
+    blogTitle: blogTitle,
   });
 
   let imported = 0;

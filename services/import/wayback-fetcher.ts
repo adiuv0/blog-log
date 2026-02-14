@@ -3,50 +3,17 @@ import { db } from "../../db/client";
 import { blogs, articles, articleTags, importJobs } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { ReadingSpeed } from "../../constants/theme";
+import {
+  generateId,
+  stripHtml,
+  countWords,
+  sleep,
+  type ProgressCallback,
+} from "./utils";
 
 const CDX_API_BASE = "https://web.archive.org/cdx/search/cdx";
 const WAYBACK_BASE = "https://web.archive.org/web";
 const RATE_LIMIT_MS = 1100; // ~1 req/sec, safely under 60/min
-
-type ImportProgress = {
-  phase: "metadata" | "content" | "nlp";
-  total: number;
-  imported: number;
-  message: string;
-};
-
-type ProgressCallback = (progress: ImportProgress) => void;
-
-function generateId(): string {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function countWords(text: string): number {
-  return text.split(/\s+/).filter((w) => w.length > 0).length;
-}
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * Normalize a feed URL: ensure HTTPS, follow known redirects, etc.
@@ -305,7 +272,13 @@ export async function importFromWayback(
   }
 
   // Step 2: Discover all posts from Wayback CDX
-  onProgress?.({ phase: "metadata", total: 0, imported: 0, message: "Querying Wayback Machine for historical snapshots..." });
+  onProgress?.({
+    phase: "metadata",
+    total: 0,
+    imported: 0,
+    message: "Querying Wayback Machine for historical snapshots...",
+    blogTitle: currentFeed.title,
+  });
 
   let snapshots: string[] = [];
   try {

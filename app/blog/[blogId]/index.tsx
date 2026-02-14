@@ -149,7 +149,10 @@ export default function ArticleListScreen() {
 
   const handleArticlePress = useCallback(
     (article: ArticleWithProgress) => {
-      router.push(`/blog/${blogId}/article?articleId=${article.id}&link=${encodeURIComponent(article.link ?? "")}`);
+      const linkParam = article.link
+        ? `&link=${encodeURIComponent(article.link)}`
+        : "";
+      router.push(`/blog/${blogId}/article?articleId=${article.id}${linkParam}`);
     },
     [blogId, router]
   );

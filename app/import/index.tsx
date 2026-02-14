@@ -7,95 +7,61 @@ import {
   Pressable,
   useColorScheme,
   ScrollView,
-  ActivityIndicator,
   Alert,
 } from "react-native";
 import { useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
-import { useQueryClient } from "@tanstack/react-query";
-import { importFromWayback } from "../../services/import/wayback-fetcher";
-import { importFromHistory4Feed, listFeeds } from "../../services/import/history4feed-api";
-import { importFromJsonFile } from "../../services/import/json-import";
+import { listFeeds } from "../../services/import/history4feed-api";
+import { useImportStatus } from "../../contexts/ImportContext";
 import { Colors, Spacing, FontSize } from "../../constants/theme";
 
 type ImportMode = "rss" | "history4feed" | "file" | null;
 
 export default function ImportScreen() {
   const router = useRouter();
-  const queryClient = useQueryClient();
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme === "dark" ? "dark" : "light"];
+
+  const {
+    hasActiveImports,
+    startWaybackImport,
+    startHistory4FeedImport,
+    startJsonImport,
+  } = useImportStatus();
 
   const [mode, setMode] = useState<ImportMode>(null);
   const [rssUrl, setRssUrl] = useState("");
   const [h4fUrl, setH4fUrl] = useState("");
   const [h4fFeeds, setH4fFeeds] = useState<Array<{ id: string; title: string }>>([]);
-  const [isImporting, setIsImporting] = useState(false);
-  const [progressMessage, setProgressMessage] = useState("");
-  const [progressPercent, setProgressPercent] = useState(0);
+  const [isConnecting, setIsConnecting] = useState(false);
 
-  const handleRssImport = async () => {
+  const handleRssImport = () => {
     if (!rssUrl.trim()) return;
-    setIsImporting(true);
-    setProgressMessage("Starting import...");
-    setProgressPercent(0);
-
-    try {
-      const blogId = await importFromWayback(rssUrl.trim(), (progress) => {
-        setProgressMessage(progress.message);
-        setProgressPercent(progress.total > 0 ? progress.imported / progress.total : 0);
-      });
-
-      queryClient.invalidateQueries({ queryKey: ["blogs"] });
-      if (blogId) {
-        router.replace(`/blog/${blogId}`);
-      } else {
-        router.back();
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      Alert.alert("Import Failed", message);
-    } finally {
-      setIsImporting(false);
-    }
+    startWaybackImport(rssUrl.trim());
+    router.back();
   };
 
   const handleH4fConnect = async () => {
     if (!h4fUrl.trim()) return;
-    setIsImporting(true);
-    setProgressMessage("Connecting to History4Feed...");
+    setIsConnecting(true);
 
     try {
       const feeds = await listFeeds(h4fUrl.trim());
       setH4fFeeds(feeds.map((f) => ({ id: f.id, title: f.title })));
-      setIsImporting(false);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not connect to the History4Feed instance. Check the URL.";
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Could not connect to the History4Feed instance. Check the URL.";
       Alert.alert("Connection Failed", message);
-      setIsImporting(false);
+    } finally {
+      setIsConnecting(false);
     }
   };
 
-  const handleH4fImport = async (feedId: string) => {
-    setIsImporting(true);
-    try {
-      const blogId = await importFromHistory4Feed(h4fUrl.trim(), feedId, (progress) => {
-        setProgressMessage(progress.message);
-        setProgressPercent(progress.total > 0 ? progress.imported / progress.total : 0);
-      });
-
-      queryClient.invalidateQueries({ queryKey: ["blogs"] });
-      if (blogId) {
-        router.replace(`/blog/${blogId}`);
-      } else {
-        router.back();
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      Alert.alert("Import Failed", message);
-    } finally {
-      setIsImporting(false);
-    }
+  const handleH4fImport = (feedId: string) => {
+    startHistory4FeedImport(h4fUrl.trim(), feedId);
+    router.back();
   };
 
   const handleFileImport = async () => {
@@ -106,49 +72,13 @@ export default function ImportScreen() {
 
       if (result.canceled || !result.assets?.[0]) return;
 
-      setIsImporting(true);
-      setProgressMessage("Reading file...");
-
-      const blogId = await importFromJsonFile(result.assets[0].uri, (progress) => {
-        setProgressMessage(progress.message);
-        setProgressPercent(progress.total > 0 ? progress.imported / progress.total : 0);
-      });
-
-      queryClient.invalidateQueries({ queryKey: ["blogs"] });
-      if (blogId) {
-        router.replace(`/blog/${blogId}`);
-      } else {
-        router.back();
-      }
+      startJsonImport(result.assets[0].uri);
+      router.back();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       Alert.alert("Import Failed", message);
-    } finally {
-      setIsImporting(false);
     }
   };
-
-  if (isImporting) {
-    return (
-      <View style={[styles.container, styles.center, { backgroundColor: colors.background }]}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={[styles.progressText, { color: colors.text }]}>{progressMessage}</Text>
-        {progressPercent > 0 && (
-          <View style={[styles.progressBar, { backgroundColor: colors.border }]}>
-            <View
-              style={[
-                styles.progressFill,
-                { backgroundColor: colors.primary, width: `${Math.round(progressPercent * 100)}%` },
-              ]}
-            />
-          </View>
-        )}
-        <Text style={[styles.hint, { color: colors.textSecondary }]}>
-          This may take a while for large blogs. The app will be usable once metadata import completes.
-        </Text>
-      </View>
-    );
-  }
 
   if (mode === null) {
     return (
@@ -160,6 +90,14 @@ export default function ImportScreen() {
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
           Choose how to import a blog's archive.
         </Text>
+
+        {hasActiveImports && (
+          <View style={[styles.activeNote, { backgroundColor: colors.primaryLight + "22" }]}>
+            <Text style={[styles.activeNoteText, { color: colors.primary }]}>
+              An import is already running. You can start another one — they'll run in parallel.
+            </Text>
+          </View>
+        )}
 
         <Pressable
           style={[styles.optionCard, { backgroundColor: colors.surface, borderColor: colors.border }]}
@@ -208,7 +146,7 @@ export default function ImportScreen() {
           Enter the RSS or ATOM feed URL for the blog. Blog Log will query the Wayback Machine for historical snapshots to build the complete archive.
         </Text>
         <Text style={[styles.warning, { color: colors.warning }]}>
-          Large blogs may take 20-40 minutes to fully import. You can browse already-imported articles while import continues.
+          Large blogs may take 20-40 minutes to fully import. You can browse the app while the import runs in the background.
         </Text>
 
         <TextInput
@@ -277,10 +215,13 @@ export default function ImportScreen() {
               <Text style={[styles.buttonText, { color: colors.text }]}>Back</Text>
             </Pressable>
             <Pressable
-              style={[styles.button, { backgroundColor: colors.primary }]}
+              style={[styles.button, { backgroundColor: colors.primary, opacity: isConnecting ? 0.6 : 1 }]}
               onPress={handleH4fConnect}
+              disabled={isConnecting}
             >
-              <Text style={[styles.buttonText, { color: "#fff" }]}>Connect</Text>
+              <Text style={[styles.buttonText, { color: "#fff" }]}>
+                {isConnecting ? "Connecting..." : "Connect"}
+              </Text>
             </Pressable>
           </View>
         ) : (
@@ -306,11 +247,19 @@ export default function ImportScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  center: { justifyContent: "center", alignItems: "center", padding: Spacing.xl },
   content: { padding: Spacing.md },
   title: { fontSize: FontSize.xl, fontWeight: "700", marginBottom: Spacing.sm },
   subtitle: { fontSize: FontSize.md, lineHeight: 24, marginBottom: Spacing.md },
   warning: { fontSize: FontSize.sm, lineHeight: 20, marginBottom: Spacing.md },
+  activeNote: {
+    borderRadius: 8,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  activeNoteText: {
+    fontSize: FontSize.sm,
+    lineHeight: 20,
+  },
   optionCard: {
     borderRadius: 12,
     padding: Spacing.md,
@@ -334,10 +283,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   buttonText: { fontWeight: "600", fontSize: FontSize.md },
-  progressText: { fontSize: FontSize.md, marginTop: Spacing.md, textAlign: "center" },
-  progressBar: { width: "80%", height: 8, borderRadius: 4, marginTop: Spacing.md, overflow: "hidden" },
-  progressFill: { height: "100%", borderRadius: 4 },
-  hint: { fontSize: FontSize.sm, marginTop: Spacing.md, textAlign: "center", lineHeight: 20 },
   feedListTitle: { fontSize: FontSize.lg, fontWeight: "600", marginTop: Spacing.md, marginBottom: Spacing.sm },
   feedItem: {
     borderRadius: 8,

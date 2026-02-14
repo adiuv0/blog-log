@@ -16,6 +16,16 @@ import {
 } from "../../../hooks/useReadingProgress";
 import { Colors, Spacing, FontSize } from "../../../constants/theme";
 
+function isValidUrl(url: string | null | undefined): url is string {
+  if (!url || url.trim().length === 0) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export default function ArticleScreen() {
   const { articleId, link } = useLocalSearchParams<{ articleId: string; link: string }>();
   const router = useRouter();
@@ -34,7 +44,8 @@ export default function ArticleScreen() {
   const [isMarkedRead, setIsMarkedRead] = useState(false);
   const [waybackUrl, setWaybackUrl] = useState<string | null>(null);
 
-  const articleUrl = link ? decodeURIComponent(link) : article?.link ?? "";
+  const rawUrl = link ? decodeURIComponent(link) : article?.link ?? null;
+  const articleUrl = isValidUrl(rawUrl) ? rawUrl : null;
 
   // Start reading session (guard with ref to prevent double-fire in StrictMode)
   useEffect(() => {
@@ -44,9 +55,13 @@ export default function ArticleScreen() {
     // Mark as in_progress
     updateStatus.mutate({ articleId, status: "in_progress" });
 
-    startSession.mutateAsync(articleId).then((id) => {
-      if (id !== undefined) sessionIdRef.current = id;
-    });
+    startSession.mutateAsync(articleId)
+      .then((id) => {
+        if (id !== undefined) sessionIdRef.current = id;
+      })
+      .catch((err) => {
+        console.warn("[BlogLog] Failed to start reading session:", err);
+      });
 
     return () => {
       if (sessionIdRef.current !== null) {
@@ -90,7 +105,7 @@ export default function ArticleScreen() {
   };
 
   // Build the WebView URL
-  const displayUrl = waybackUrl ?? (loadError ? "" : articleUrl);
+  const displayUrl = waybackUrl ?? (loadError ? null : articleUrl);
 
   return (
     <>
@@ -156,7 +171,15 @@ export default function ArticleScreen() {
               if (statusCode >= 400) handleLoadError();
             }}
           />
-        ) : null}
+        ) : (
+          // No valid URL available
+          <View style={styles.errorContainer}>
+            <Text style={[styles.errorTitle, { color: colors.text }]}>No link available</Text>
+            <Text style={[styles.errorDesc, { color: colors.textSecondary }]}>
+              This article does not have a valid URL. It may have been imported without a link.
+            </Text>
+          </View>
+        )}
 
         {/* Bottom toolbar */}
         <View style={[styles.toolbar, { backgroundColor: colors.surface, borderTopColor: colors.border }]}>
