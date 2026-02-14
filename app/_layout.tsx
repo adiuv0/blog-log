@@ -110,6 +110,12 @@ export default function RootLayout() {
                   presentation: "modal",
                 }}
               />
+              <Stack.Screen
+                name="imports"
+                options={{
+                  title: "Background Tasks",
+                }}
+              />
             </Stack>
           </ImportProvider>
         </QueryClientProvider>

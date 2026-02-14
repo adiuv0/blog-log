@@ -85,7 +85,9 @@ export function useArticles(
           : sortField === "title"
           ? "a.title"
           : "a.reading_time_minutes";
-      query += ` ORDER BY ${sortCol} ${sortDirection === "asc" ? "ASC" : "DESC"}`;
+      // Push NULLs to the end regardless of sort direction
+      // (e.g. articles with no pubdate go last in both "Newest" and "Oldest" modes)
+      query += ` ORDER BY ${sortCol} IS NULL ASC, ${sortCol} ${sortDirection === "asc" ? "ASC" : "DESC"}`;
 
       const rows = db.$client.getAllSync(query, params) as Array<{
         id: string;

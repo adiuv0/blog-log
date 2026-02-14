@@ -41,10 +41,8 @@ export function ImportProgressBanner() {
     <Pressable
       style={[styles.banner, { backgroundColor: bgColor, paddingTop: insets.top }]}
       onPress={() => {
-        if (isComplete && activeJob.blogId) {
-          dismissJob(activeJob.jobId);
-          router.push(`/blog/${activeJob.blogId}`);
-        }
+        // Tap always navigates to the full imports screen
+        router.push("/imports");
       }}
     >
       <View style={styles.row}>
@@ -64,7 +62,7 @@ export function ImportProgressBanner() {
             {isFailed
               ? activeJob.error ?? "Unknown error"
               : isComplete
-              ? "Tap to view"
+              ? "Tap for details"
               : activeJob.message}
           </Text>
         </View>
@@ -77,13 +75,19 @@ export function ImportProgressBanner() {
             hitSlop={8}
             style={styles.dismissButton}
           >
-            <Text style={styles.dismissText}>Dismiss</Text>
+            <Text style={styles.dismissText}>✕</Text>
           </Pressable>
         )}
       </View>
-      {!isComplete && !isFailed && activeJob.totalItems > 0 && (
+      {!isComplete && !isFailed && (
         <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${percent}%` }]} />
+          <View
+            style={[
+              styles.progressFill,
+              { width: activeJob.totalItems > 0 ? `${percent}%` : "100%" },
+              activeJob.totalItems === 0 && styles.progressIndeterminate,
+            ]}
+          />
         </View>
       )}
     </Pressable>
@@ -137,5 +141,8 @@ const styles = StyleSheet.create({
     height: "100%",
     backgroundColor: "#fff",
     borderRadius: 2,
+  },
+  progressIndeterminate: {
+    opacity: 0.4,
   },
 });

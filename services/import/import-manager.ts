@@ -12,10 +12,16 @@ import { importFromHistory4Feed } from "./history4feed-api";
 import { importFromJsonFile } from "./json-import";
 import { generateId, type ImportProgress } from "./utils";
 
+export type ImportLogEntry = {
+  timestamp: string;
+  message: string;
+};
+
 export type ImportJobState = {
   jobId: string;
   blogId: string | null;
   blogTitle: string;
+  feedUrl: string;
   source: "wayback" | "history4feed" | "json_file";
   status: "running" | "completed" | "failed";
   phase: string;
@@ -25,6 +31,8 @@ export type ImportJobState = {
   error: string | null;
   startedAt: string;
   completedAt: string | null;
+  /** Rolling event log (latest 50 entries) so the user can see what's happening */
+  log: ImportLogEntry[];
 };
 
 type Listener = (jobs: Map<string, ImportJobState>) => void;
@@ -166,10 +174,12 @@ class ImportManager {
     displayName: string,
     source: ImportJobState["source"]
   ): void {
+    const now = new Date().toISOString();
     this.jobs.set(jobId, {
       jobId,
       blogId: null,
       blogTitle: displayName,
+      feedUrl: displayName, // will be overridden when blog title arrives
       source,
       status: "running",
       phase: "metadata",
@@ -177,8 +187,9 @@ class ImportManager {
       importedItems: 0,
       message: "Starting import...",
       error: null,
-      startedAt: new Date().toISOString(),
+      startedAt: now,
       completedAt: null,
+      log: [{ timestamp: now, message: "Import started" }],
     });
     this.notify();
   }
@@ -194,6 +205,13 @@ class ImportManager {
     if (progress.blogTitle) {
       job.blogTitle = progress.blogTitle;
     }
+
+    // Append to log (keep last 100 entries)
+    job.log.push({ timestamp: new Date().toISOString(), message: progress.message });
+    if (job.log.length > 100) {
+      job.log = job.log.slice(-100);
+    }
+
     this.notify();
   }
 
@@ -201,20 +219,22 @@ class ImportManager {
     const job = this.jobs.get(jobId);
     if (!job) return;
 
+    const now = new Date().toISOString();
     job.status = "completed";
     job.blogId = blogId;
-    job.completedAt = new Date().toISOString();
+    job.completedAt = now;
     job.message = `Import complete! ${job.importedItems} articles imported.`;
+    job.log.push({ timestamp: now, message: job.message });
     this.notify();
 
     // Invalidate blog list so Library screen updates
     this.queryClient?.invalidateQueries({ queryKey: ["blogs"] });
 
-    // Auto-dismiss completed jobs after 10 seconds
+    // Auto-dismiss completed jobs after 30 seconds (longer to let user see)
     const timer = setTimeout(() => {
       this.autoDismissTimers.delete(jobId);
       this.dismissJob(jobId);
-    }, 10_000);
+    }, 30_000);
     this.autoDismissTimers.set(jobId, timer);
   }
 
@@ -222,11 +242,13 @@ class ImportManager {
     const job = this.jobs.get(jobId);
     if (!job) return;
 
+    const now = new Date().toISOString();
     const message = err instanceof Error ? err.message : String(err);
     job.status = "failed";
     job.error = message;
-    job.completedAt = new Date().toISOString();
+    job.completedAt = now;
     job.message = `Import failed: ${message}`;
+    job.log.push({ timestamp: now, message: job.message });
     this.notify();
   }
 
