@@ -1,9 +1,17 @@
-import { View, Text, StyleSheet, Pressable, useColorScheme, FlatList } from "react-native";
+import { View, Text, StyleSheet, Pressable, useColorScheme, FlatList, Alert } from "react-native";
 import { useRouter } from "expo-router";
-import { useBlogs, type BlogWithStats } from "../../hooks/useBlogs";
+import { useBlogs, useDeleteBlog, type BlogWithStats } from "../../hooks/useBlogs";
 import { Colors, Spacing, FontSize } from "../../constants/theme";
 
-function BlogCard({ blog, colors }: { blog: BlogWithStats; colors: typeof Colors.light }) {
+function BlogCard({
+  blog,
+  colors,
+  onDelete,
+}: {
+  blog: BlogWithStats;
+  colors: typeof Colors.light;
+  onDelete: (blog: BlogWithStats) => void;
+}) {
   const router = useRouter();
   const progress = blog.postCount > 0 ? blog.readCount / blog.postCount : 0;
 
@@ -11,6 +19,8 @@ function BlogCard({ blog, colors }: { blog: BlogWithStats; colors: typeof Colors
     <Pressable
       style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}
       onPress={() => router.push(`/blog/${blog.id}`)}
+      onLongPress={() => onDelete(blog)}
+      delayLongPress={500}
     >
       <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={2}>
         {blog.title}
@@ -53,6 +63,24 @@ export default function LibraryScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme === "dark" ? "dark" : "light"];
   const { data: blogList, isLoading } = useBlogs();
+  const deleteBlog = useDeleteBlog();
+
+  const handleDeleteBlog = (blog: BlogWithStats) => {
+    Alert.alert(
+      "Delete Blog",
+      `Are you sure you want to delete "${blog.title}"? This will remove all ${blog.postCount} articles and your reading progress. This cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            deleteBlog.mutate(blog.id);
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -75,7 +103,9 @@ export default function LibraryScreen() {
         <FlatList
           data={blogList}
           keyExtractor={(item) => item.id}
-          renderItem={({ item }) => <BlogCard blog={item} colors={colors} />}
+          renderItem={({ item }) => (
+            <BlogCard blog={item} colors={colors} onDelete={handleDeleteBlog} />
+          )}
           contentContainerStyle={styles.listContent}
           ListHeaderComponent={
             <View style={styles.header}>
@@ -89,6 +119,13 @@ export default function LibraryScreen() {
                 <Text style={styles.addButtonText}>+ Add</Text>
               </Pressable>
             </View>
+          }
+          ListFooterComponent={
+            blogList && blogList.length > 0 ? (
+              <Text style={[styles.hintText, { color: colors.textSecondary }]}>
+                Long press a blog to delete it
+              </Text>
+            ) : null
           }
         />
       )}
@@ -129,6 +166,13 @@ const styles = StyleSheet.create({
   progressFill: { height: "100%", borderRadius: 4 },
   progressText: { fontSize: FontSize.xs, marginTop: Spacing.xs },
   inProgressText: { fontSize: FontSize.xs, marginTop: 2 },
+  hintText: {
+    fontSize: FontSize.xs,
+    textAlign: "center",
+    marginTop: Spacing.sm,
+    marginBottom: Spacing.md,
+    fontStyle: "italic",
+  },
   emptyState: {
     flex: 1,
     justifyContent: "center",

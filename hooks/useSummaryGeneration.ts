@@ -1,8 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { db } from "../db/client";
-import { articles } from "../db/schema";
-import { eq, isNull, and, isNotNull } from "drizzle-orm";
+import { logger } from "../services/logger";
 import { summarize } from "../services/nlp/textrank";
 
 /**
@@ -29,14 +28,24 @@ export function useSummaryGeneration(blogId: string | undefined) {
 
         if (pending.length === 0) return;
 
+        logger.debug("SummaryGen", `Generating summaries for ${pending.length} articles in blog ${blogId}`);
+
+        let generated = 0;
         for (let i = 0; i < pending.length; i++) {
           const article = pending[i];
-          const summary = summarize(article.content_text);
 
-          db.$client.runSync(
-            `UPDATE articles SET summary = ? WHERE id = ?`,
-            [summary, article.id]
-          );
+          try {
+            const summary = summarize(article.content_text);
+
+            db.$client.runSync(
+              `UPDATE articles SET summary = ? WHERE id = ?`,
+              [summary, article.id]
+            );
+            generated++;
+          } catch (err) {
+            logger.warn("SummaryGen", `Failed to generate summary for article ${article.id}`, err instanceof Error ? err.message : String(err));
+            // Continue with next article
+          }
 
           // Yield every 10 articles
           if (i % 10 === 0) {
@@ -44,8 +53,12 @@ export function useSummaryGeneration(blogId: string | undefined) {
           }
         }
 
+        logger.info("SummaryGen", `Generated ${generated}/${pending.length} summaries for blog ${blogId}`);
+
         // Invalidate article queries to show summaries
         queryClient.invalidateQueries({ queryKey: ["articles", blogId] });
+      } catch (err) {
+        logger.error("SummaryGen", `Summary generation failed for blog ${blogId}`, err instanceof Error ? err.message : String(err));
       } finally {
         runningRef.current = false;
       }

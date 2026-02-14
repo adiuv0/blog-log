@@ -14,6 +14,8 @@ import {
   useStartReadingSession,
   useEndReadingSession,
 } from "../../../hooks/useReadingProgress";
+import { ErrorBoundary } from "../../../components/ErrorBoundary";
+import { logger } from "../../../services/logger";
 import { Colors, Spacing, FontSize } from "../../../constants/theme";
 
 function isValidUrl(url: string | null | undefined): url is string {
@@ -26,13 +28,15 @@ function isValidUrl(url: string | null | undefined): url is string {
   }
 }
 
-export default function ArticleScreen() {
+function ArticleScreenInner() {
   const { articleId, link } = useLocalSearchParams<{ articleId: string; link: string }>();
   const router = useRouter();
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme === "dark" ? "dark" : "light"];
 
-  const { data: article } = useArticleContent(articleId);
+  logger.debug("ArticleScreen", `Mounting with articleId=${articleId}, link=${link ? "present" : "absent"}`);
+
+  const { data: article, error: articleError } = useArticleContent(articleId ?? "");
   const updateStatus = useUpdateReadingStatus();
   const startSession = useStartReadingSession();
   const endSession = useEndReadingSession();
@@ -44,28 +48,64 @@ export default function ArticleScreen() {
   const [isMarkedRead, setIsMarkedRead] = useState(false);
   const [waybackUrl, setWaybackUrl] = useState<string | null>(null);
 
-  const rawUrl = link ? decodeURIComponent(link) : article?.link ?? null;
-  const articleUrl = isValidUrl(rawUrl) ? rawUrl : null;
+  // Log article query errors
+  if (articleError) {
+    logger.error("ArticleScreen", "useArticleContent query error", articleError instanceof Error ? articleError.message : String(articleError));
+  }
+
+  // Safely compute URL
+  let articleUrl: string | null = null;
+  try {
+    const rawUrl = link ? decodeURIComponent(link) : article?.link ?? null;
+    articleUrl = isValidUrl(rawUrl) ? rawUrl : null;
+  } catch (err) {
+    logger.error("ArticleScreen", "URL decode error", err instanceof Error ? err.message : String(err));
+    articleUrl = null;
+  }
+
+  logger.debug("ArticleScreen", `Computed articleUrl: ${articleUrl ?? "(null)"}`);
 
   // Start reading session (guard with ref to prevent double-fire in StrictMode)
   useEffect(() => {
     if (!articleId || hasStartedRef.current) return;
     hasStartedRef.current = true;
 
-    // Mark as in_progress
-    updateStatus.mutate({ articleId, status: "in_progress" });
+    logger.info("ArticleScreen", `Starting reading session for ${articleId}`);
 
-    startSession.mutateAsync(articleId)
+    // Mark as in_progress — wrapped in try-catch to prevent crash
+    try {
+      updateStatus.mutate(
+        { articleId, status: "in_progress" },
+        {
+          onError: (err) => {
+            logger.error("ArticleScreen", "Failed to update reading status", err instanceof Error ? err.message : String(err));
+          },
+        }
+      );
+    } catch (err) {
+      logger.error("ArticleScreen", "Synchronous error calling updateStatus.mutate", err instanceof Error ? err.message : String(err));
+    }
+
+    // Start session — fully wrapped, non-critical
+    startSession
+      .mutateAsync(articleId)
       .then((id) => {
-        if (id !== undefined) sessionIdRef.current = id;
+        if (id !== undefined && id !== null) {
+          sessionIdRef.current = id;
+          logger.info("ArticleScreen", `Session started with id ${id}`);
+        }
       })
       .catch((err) => {
-        console.warn("[BlogLog] Failed to start reading session:", err);
+        logger.warn("ArticleScreen", "Failed to start reading session (non-critical)", err instanceof Error ? err.message : String(err));
       });
 
     return () => {
       if (sessionIdRef.current !== null) {
-        endSession.mutate(sessionIdRef.current);
+        try {
+          endSession.mutate(sessionIdRef.current);
+        } catch (err) {
+          logger.warn("ArticleScreen", "Failed to end reading session on unmount", err instanceof Error ? err.message : String(err));
+        }
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -73,18 +113,29 @@ export default function ArticleScreen() {
 
   const handleMarkAsRead = () => {
     if (!articleId || isMarkedRead) return;
-    updateStatus.mutate({ articleId, status: "read" });
-    setIsMarkedRead(true);
+    try {
+      updateStatus.mutate(
+        { articleId, status: "read" },
+        {
+          onError: (err) => {
+            logger.error("ArticleScreen", "Failed to mark as read", err instanceof Error ? err.message : String(err));
+          },
+        }
+      );
+      setIsMarkedRead(true);
+    } catch (err) {
+      logger.error("ArticleScreen", "Synchronous error marking as read", err instanceof Error ? err.message : String(err));
+    }
   };
 
   // Injected JS to detect scroll to bottom in the WebView
   const injectedJs = `
     (function() {
-      let reported = false;
+      var reported = false;
       window.addEventListener('scroll', function() {
-        const scrollHeight = document.documentElement.scrollHeight;
-        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-        const clientHeight = window.innerHeight;
+        var scrollHeight = document.documentElement.scrollHeight;
+        var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+        var clientHeight = window.innerHeight;
         if (!reported && (scrollTop + clientHeight >= scrollHeight - 200)) {
           reported = true;
           window.ReactNativeWebView.postMessage('REACHED_BOTTOM');
@@ -101,8 +152,30 @@ export default function ArticleScreen() {
   };
 
   const handleLoadError = () => {
+    logger.warn("ArticleScreen", `WebView load error for URL: ${articleUrl}`);
     setLoadError(true);
   };
+
+  // Guard: if articleId is missing, show error
+  if (!articleId) {
+    logger.error("ArticleScreen", "No articleId in params");
+    return (
+      <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <View style={styles.errorContainer}>
+          <Text style={[styles.errorTitle, { color: colors.text }]}>Missing article ID</Text>
+          <Text style={[styles.errorDesc, { color: colors.textSecondary }]}>
+            Could not determine which article to display.
+          </Text>
+          <Pressable
+            style={[styles.waybackButton, { backgroundColor: colors.primary }]}
+            onPress={() => router.back()}
+          >
+            <Text style={styles.waybackButtonText}>Go Back</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
 
   // Build the WebView URL
   const displayUrl = waybackUrl ?? (loadError ? null : articleUrl);
@@ -172,13 +245,28 @@ export default function ArticleScreen() {
             }}
           />
         ) : (
-          // No valid URL available
-          <View style={styles.errorContainer}>
-            <Text style={[styles.errorTitle, { color: colors.text }]}>No link available</Text>
-            <Text style={[styles.errorDesc, { color: colors.textSecondary }]}>
-              This article does not have a valid URL. It may have been imported without a link.
-            </Text>
-          </View>
+          // No valid URL available — show cached content if available
+          article?.contentHtml ? (
+            <WebView
+              source={{ html: wrapHtml(article.contentHtml, colorScheme === "dark") }}
+              style={{ flex: 1 }}
+              injectedJavaScript={injectedJs}
+              onMessage={handleMessage}
+            />
+          ) : (
+            <View style={styles.errorContainer}>
+              <Text style={[styles.errorTitle, { color: colors.text }]}>No content available</Text>
+              <Text style={[styles.errorDesc, { color: colors.textSecondary }]}>
+                This article does not have a valid URL or cached content.
+              </Text>
+              <Pressable
+                style={[styles.waybackButton, { backgroundColor: colors.primary }]}
+                onPress={() => router.back()}
+              >
+                <Text style={styles.waybackButtonText}>Go Back</Text>
+              </Pressable>
+            </View>
+          )
         )}
 
         {/* Bottom toolbar */}
@@ -213,6 +301,19 @@ export default function ArticleScreen() {
         </View>
       </View>
     </>
+  );
+}
+
+// Wrap with ErrorBoundary so crashes show a fallback instead of killing the app
+export default function ArticleScreen() {
+  const router = useRouter();
+  return (
+    <ErrorBoundary
+      fallbackTitle="Article could not be loaded"
+      onReset={() => router.back()}
+    >
+      <ArticleScreenInner />
+    </ErrorBoundary>
   );
 }
 

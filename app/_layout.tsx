@@ -9,13 +9,30 @@ import { Colors } from "../constants/theme";
 import { ImportProvider } from "../contexts/ImportContext";
 import { importManager } from "../services/import/import-manager";
 import { ImportProgressBanner } from "../components/ImportProgressBanner";
+import { ErrorBoundary } from "../components/ErrorBoundary";
+import { logger } from "../services/logger";
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 1000 * 60 * 5,
+      // Prevent query errors from being unhandled
+      retry: 1,
+    },
+    mutations: {
+      retry: 0,
     },
   },
+});
+
+// Install global unhandled error/rejection handlers
+const originalHandler = ErrorUtils.getGlobalHandler();
+ErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
+  logger.error("GlobalError", `${isFatal ? "FATAL" : "Non-fatal"} error: ${error.message}`, error.stack?.substring(0, 1000));
+  // Still call the original handler
+  if (originalHandler) {
+    originalHandler(error, isFatal);
+  }
 });
 
 export default function RootLayout() {
@@ -25,13 +42,16 @@ export default function RootLayout() {
   const colors = Colors[colorScheme === "dark" ? "dark" : "light"];
 
   useEffect(() => {
+    logger.info("App", "Blog Log starting up");
+
     initializeDatabase()
       .then(() => {
+        logger.info("App", "Database initialized successfully");
         setDbReady(true);
         importManager.setQueryClient(queryClient);
       })
       .catch((err) => {
-        console.error("Database init failed:", err);
+        logger.error("App", "Database init failed", err instanceof Error ? err.message : String(err));
         setDbError(String(err));
       });
   }, []);
@@ -61,38 +81,40 @@ export default function RootLayout() {
   }
 
   return (
-    <SafeAreaProvider>
-      <QueryClientProvider client={queryClient}>
-        <ImportProvider>
-          <StatusBar style="auto" />
-          <ImportProgressBanner />
-          <Stack
-            screenOptions={{
-              headerStyle: { backgroundColor: colors.surface },
-              headerTintColor: colors.text,
-              contentStyle: { backgroundColor: colors.background },
-            }}
-          >
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen
-              name="blog/[blogId]/index"
-              options={{ title: "Articles" }}
-            />
-            <Stack.Screen
-              name="blog/[blogId]/article"
-              options={{ title: "Reading", headerShown: false }}
-            />
-            <Stack.Screen
-              name="import/index"
-              options={{
-                title: "Import Blog",
-                presentation: "modal",
+    <ErrorBoundary fallbackTitle="Blog Log encountered an error">
+      <SafeAreaProvider>
+        <QueryClientProvider client={queryClient}>
+          <ImportProvider>
+            <StatusBar style="auto" />
+            <ImportProgressBanner />
+            <Stack
+              screenOptions={{
+                headerStyle: { backgroundColor: colors.surface },
+                headerTintColor: colors.text,
+                contentStyle: { backgroundColor: colors.background },
               }}
-            />
-          </Stack>
-        </ImportProvider>
-      </QueryClientProvider>
-    </SafeAreaProvider>
+            >
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen
+                name="blog/[blogId]/index"
+                options={{ title: "Articles" }}
+              />
+              <Stack.Screen
+                name="blog/[blogId]/article"
+                options={{ title: "Reading", headerShown: false }}
+              />
+              <Stack.Screen
+                name="import/index"
+                options={{
+                  title: "Import Blog",
+                  presentation: "modal",
+                }}
+              />
+            </Stack>
+          </ImportProvider>
+        </QueryClientProvider>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }
 
