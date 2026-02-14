@@ -15,12 +15,12 @@ type ImportContextValue = {
   jobs: ImportJobState[];
   /** Whether any import is currently running */
   hasActiveImports: boolean;
-  /** Start a Wayback import. Returns jobId immediately. */
-  startWaybackImport: (feedUrl: string) => string;
-  /** Start a History4Feed import. Returns jobId immediately. */
-  startHistory4FeedImport: (baseUrl: string, feedId: string) => string;
-  /** Start a JSON file import. Returns jobId immediately. */
-  startJsonImport: (fileUri: string) => string;
+  /** Start a Wayback import. Returns jobId, or null if already importing this URL. */
+  startWaybackImport: (feedUrl: string) => string | null;
+  /** Start a History4Feed import. Returns jobId, or null if already importing. */
+  startHistory4FeedImport: (baseUrl: string, feedId: string) => string | null;
+  /** Start a JSON file import. Returns jobId. */
+  startJsonImport: (fileUri: string) => string | null;
   /** Dismiss a completed/failed job from the banner */
   dismissJob: (jobId: string) => void;
 };

@@ -37,7 +37,14 @@ export default function ImportScreen() {
 
   const handleRssImport = () => {
     if (!rssUrl.trim()) return;
-    startWaybackImport(rssUrl.trim());
+    const jobId = startWaybackImport(rssUrl.trim());
+    if (jobId === null) {
+      Alert.alert(
+        "Already Importing",
+        "This feed is already being imported. Check the progress banner at the top of the screen."
+      );
+      return;
+    }
     router.back();
   };
 
@@ -60,7 +67,14 @@ export default function ImportScreen() {
   };
 
   const handleH4fImport = (feedId: string) => {
-    startHistory4FeedImport(h4fUrl.trim(), feedId);
+    const jobId = startHistory4FeedImport(h4fUrl.trim(), feedId);
+    if (jobId === null) {
+      Alert.alert(
+        "Already Importing",
+        "This feed is already being imported. Check the progress banner at the top of the screen."
+      );
+      return;
+    }
     router.back();
   };
 

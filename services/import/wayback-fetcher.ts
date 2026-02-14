@@ -201,6 +201,11 @@ function isSubstackFeedContent(feedText: string): boolean {
  * Fetch all pages of a paginated RSS feed.
  * Substack uses ?page=N, WordPress uses ?paged=N.
  * Returns all discovered posts and the feed metadata from page 1.
+ *
+ * IMPORTANT: Substack custom domains (e.g. astralcodexten.substack.com)
+ * redirect to the custom domain (www.astralcodexten.com). We capture
+ * response.url after the redirect and use THAT as the pagination base,
+ * so page 2+ URLs point to the final host.
  */
 async function fetchPaginatedFeed(
   feedUrl: string,
@@ -216,6 +221,12 @@ async function fetchPaginatedFeed(
   // Fetch page 1
   const response = await fetchWithRetry(feedUrl);
   if (!response) return null;
+
+  // Capture the FINAL URL after any redirects (critical for Substack custom domains)
+  const finalUrl = response.url || feedUrl;
+  if (finalUrl !== feedUrl) {
+    logger.info("WaybackFetch", `Feed redirected: ${feedUrl} → ${finalUrl}`);
+  }
 
   let firstPageText: string;
   try {
@@ -251,24 +262,34 @@ async function fetchPaginatedFeed(
     };
   }
 
-  // Detect pagination type
-  let pagination = detectPaginatedFeed(feedUrl);
+  // Detect pagination type — check BOTH the original URL and the final redirect URL
+  let pagination = detectPaginatedFeed(feedUrl) ?? detectPaginatedFeed(finalUrl);
 
-  // If no pagination detected by URL, check feed content for Substack
+  // If no pagination detected by URL, check feed content for Substack markers
   if (!pagination && isSubstackFeedContent(firstPageText)) {
-    const base = feedUrl.split("?")[0];
+    // Use the final (redirected) URL as the base for pagination
+    const base = finalUrl.split("?")[0];
     pagination = { type: "substack", baseUrl: base };
-    logger.info("WaybackFetch", "Detected Substack feed from content");
+    logger.info("WaybackFetch", `Detected Substack feed from content, base: ${base}`);
+  }
+
+  // If pagination was detected from the original URL, override the base with the final URL
+  // This is critical: substack.com/feed redirects to customdomain.com/feed,
+  // and we need to paginate customdomain.com/feed?page=N
+  if (pagination && finalUrl !== feedUrl) {
+    const finalBase = finalUrl.split("?")[0];
+    logger.info("WaybackFetch", `Overriding pagination base from redirect: ${pagination.baseUrl} → ${finalBase}`);
+    pagination.baseUrl = finalBase;
   }
 
   const allItems: DiscoveredPost[] = [...firstItems];
   const seenLinks = new Set(firstItems.map((p) => p.link));
 
   if (pagination) {
-    logger.info("WaybackFetch", `Feed type: ${pagination.type}, will paginate`);
+    logger.info("WaybackFetch", `Feed type: ${pagination.type}, base: ${pagination.baseUrl}, will paginate`);
 
     // Paginate through remaining pages
-    const MAX_PAGES = 100; // Safety limit
+    const MAX_PAGES = 200; // Raised safety limit for large blogs like ACX (~600 posts)
     let page = 2;
     let consecutiveEmpty = 0;
 
@@ -326,7 +347,7 @@ async function fetchPaginatedFeed(
           }
         }
 
-        logger.debug("WaybackFetch", `Page ${page}: ${pageItems.length} items, ${newItems} new`);
+        logger.info("WaybackFetch", `Page ${page}: ${pageItems.length} items, ${newItems} new (total: ${allItems.length})`);
 
         if (newItems === 0) {
           consecutiveEmpty++;
@@ -343,6 +364,8 @@ async function fetchPaginatedFeed(
     }
 
     logger.info("WaybackFetch", `Pagination complete: ${allItems.length} total posts from ${page - 1} pages`);
+  } else {
+    logger.info("WaybackFetch", `No pagination detected for ${feedUrl} — only page 1 items`);
   }
 
   return {
@@ -535,6 +558,9 @@ export async function importFromWayback(
         const articleId = generateId();
 
         // Safely extract content text from description
+        // NOTE: RSS descriptions are usually just short excerpts, NOT the full
+        // article. We store the excerpt but do NOT compute reading time from it
+        // because it would be wildly inaccurate (showing "1 min" for everything).
         let contentText: string | null = null;
         try {
           contentText = post.description ? stripHtml(post.description) : null;
@@ -542,7 +568,13 @@ export async function importFromWayback(
           contentText = null;
         }
 
-        const words = contentText ? countWords(contentText) : 0;
+        // Only compute word count / reading time for genuine full-text content
+        // (> 500 chars is a rough heuristic — real blog posts are typically 2000+ chars)
+        const isFullText = contentText != null && contentText.length > 500;
+        const words = isFullText ? countWords(contentText!) : 0;
+        const readingTime = isFullText
+          ? Math.max(1, Math.ceil(words / ReadingSpeed.wordsPerMinute))
+          : 0; // 0 = unknown, don't display
 
         db.$client.runSync(
           `INSERT OR IGNORE INTO articles (id, blog_id, title, link, author, pubdate, content_text, word_count, reading_time_minutes, is_full_text, imported_at)
@@ -556,8 +588,8 @@ export async function importFromWayback(
             post.pubdate ?? null,
             contentText,
             words,
-            Math.max(1, Math.ceil(words / ReadingSpeed.wordsPerMinute)),
-            contentText && contentText.length > 200 ? 1 : 0,
+            readingTime,
+            isFullText ? 1 : 0,
             now,
           ]
         );

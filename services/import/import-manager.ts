@@ -70,9 +70,32 @@ class ImportManager {
   }
 
   /**
-   * Start a Wayback Machine import. Returns immediately with the jobId.
+   * Check if an import is already running for a given feed URL.
+   * Normalizes URLs by stripping protocol and trailing slashes for comparison.
    */
-  startWaybackImport(feedUrl: string): string {
+  private isAlreadyImporting(feedUrl: string): string | null {
+    const normalize = (url: string) =>
+      url.toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    const target = normalize(feedUrl);
+
+    for (const job of this.jobs.values()) {
+      if (job.status === "running" && normalize(job.blogTitle) === target) {
+        return job.jobId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Start a Wayback Machine import. Returns immediately with the jobId.
+   * Returns null if an import for the same URL is already running.
+   */
+  startWaybackImport(feedUrl: string): string | null {
+    const existingJob = this.isAlreadyImporting(feedUrl);
+    if (existingJob) {
+      return null; // Already importing this feed
+    }
+
     const jobId = generateId();
     this.initJob(jobId, feedUrl, "wayback");
 
@@ -87,8 +110,14 @@ class ImportManager {
 
   /**
    * Start a History4Feed import. Returns immediately with the jobId.
+   * Returns null if an import for the same URL is already running.
    */
-  startHistory4FeedImport(baseUrl: string, feedId: string): string {
+  startHistory4FeedImport(baseUrl: string, feedId: string): string | null {
+    const existingJob = this.isAlreadyImporting(baseUrl);
+    if (existingJob) {
+      return null;
+    }
+
     const jobId = generateId();
     this.initJob(jobId, baseUrl, "history4feed");
 
@@ -104,7 +133,7 @@ class ImportManager {
   /**
    * Start a JSON file import. Returns immediately with the jobId.
    */
-  startJsonImport(fileUri: string): string {
+  startJsonImport(fileUri: string): string | null {
     const jobId = generateId();
     this.initJob(jobId, "JSON file", "json_file");
 
