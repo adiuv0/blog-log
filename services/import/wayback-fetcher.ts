@@ -3,6 +3,7 @@ import { db } from "../../db/client";
 import { blogs, articles, articleTags, importJobs } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { ReadingSpeed } from "../../constants/theme";
+import { logger } from "../logger";
 import {
   generateId,
   stripHtml,
@@ -45,16 +46,17 @@ async function fetchWithRetry(
       if (response.status === 429) {
         // Rate limited — back off exponentially
         const backoff = RATE_LIMIT_MS * Math.pow(2, attempt + 1);
+        logger.warn("WaybackFetch", `Rate limited, backing off ${backoff}ms`);
         await sleep(backoff);
         continue;
       }
       if (!response.ok) {
-        console.warn(`[BlogLog] fetch ${url} returned ${response.status}`);
+        logger.warn("WaybackFetch", `fetch ${url} returned ${response.status}`);
         return null;
       }
       return response;
     } catch (err) {
-      console.warn(`[BlogLog] fetch attempt ${attempt + 1} failed for ${url}:`, err);
+      logger.warn("WaybackFetch", `fetch attempt ${attempt + 1} failed for ${url}`, err instanceof Error ? err.message : String(err));
       if (attempt < maxRetries - 1) {
         await sleep(RATE_LIMIT_MS * Math.pow(2, attempt));
       }
@@ -75,7 +77,7 @@ async function safeParseFeed(text: string): Promise<rssParser.Feed | null> {
     const feed = await rssParser.parse(feedText);
     return feed;
   } catch (err) {
-    console.warn("[BlogLog] RSS parse error:", err);
+    logger.warn("WaybackFetch", "RSS parse error", err instanceof Error ? err.message : String(err));
     return null;
   }
 }
@@ -161,42 +163,194 @@ async function fetchFeedSnapshot(
 }
 
 /**
- * Fetch the current (live) RSS feed to get blog metadata and recent posts.
- * Follows redirects and handles various feed formats.
+ * Detect if a feed URL is from a platform that supports pagination.
+ * Returns the base URL for pagination, or null if not paginated.
  */
-async function fetchCurrentFeed(feedUrl: string) {
+function detectPaginatedFeed(feedUrl: string): { type: "substack" | "wordpress"; baseUrl: string } | null {
+  const url = feedUrl.toLowerCase();
+
+  // Substack feeds: *.substack.com/feed or known Substack custom domains
+  if (url.includes("substack.com/feed") || url.includes(".substack.com/")) {
+    // Base is everything before any query params
+    const base = feedUrl.split("?")[0];
+    return { type: "substack", baseUrl: base };
+  }
+
+  // WordPress feeds: /feed/ or ?feed=rss2 — support ?paged=N
+  if (url.includes("/feed") && !url.includes("substack")) {
+    const base = feedUrl.split("?")[0];
+    return { type: "wordpress", baseUrl: base };
+  }
+
+  // Check for custom domain Substack by looking at feed content structure
+  // (handled at call site after fetching first page)
+  return null;
+}
+
+/**
+ * Detect if a feed is Substack by examining its content.
+ * Substack feeds have specific patterns in their XML.
+ */
+function isSubstackFeedContent(feedText: string): boolean {
+  return feedText.includes("substack.com") ||
+    feedText.includes("substackcdn.com") ||
+    feedText.includes("<generator>Substack</generator>");
+}
+
+/**
+ * Fetch all pages of a paginated RSS feed.
+ * Substack uses ?page=N, WordPress uses ?paged=N.
+ * Returns all discovered posts and the feed metadata from page 1.
+ */
+async function fetchPaginatedFeed(
+  feedUrl: string,
+  onProgress?: ProgressCallback,
+): Promise<{
+  title: string;
+  description: string | null;
+  siteUrl: string | null;
+  items: DiscoveredPost[];
+} | null> {
+  logger.info("WaybackFetch", `Fetching paginated feed: ${feedUrl}`);
+
+  // Fetch page 1
   const response = await fetchWithRetry(feedUrl);
   if (!response) return null;
 
+  let firstPageText: string;
   try {
-    const text = await response.text();
-
-    // Verify we actually got XML/RSS content, not an HTML error page
-    const trimmed = text.trimStart();
-    if (
-      !trimmed.startsWith("<?xml") &&
-      !trimmed.startsWith("<rss") &&
-      !trimmed.startsWith("<feed") &&
-      !trimmed.startsWith("<!DOCTYPE") // some feeds start with DOCTYPE
-    ) {
-      // Might be an HTML redirect page or error page
-      console.warn("[BlogLog] Feed response does not look like XML, first 200 chars:", trimmed.substring(0, 200));
-      return null;
-    }
-
-    const feed = await safeParseFeed(text);
-    if (!feed) return null;
-
-    return {
-      title: feed.title ?? "Unknown Blog",
-      description: feed.description ?? null,
-      siteUrl: feed.links?.[0]?.url ?? null,
-      items: extractPostsFromFeed(feed),
-    };
-  } catch (err) {
-    console.warn("[BlogLog] fetchCurrentFeed error:", err);
+    firstPageText = await response.text();
+  } catch {
     return null;
   }
+
+  // Verify it's XML
+  const trimmed = firstPageText.trimStart();
+  if (
+    !trimmed.startsWith("<?xml") &&
+    !trimmed.startsWith("<rss") &&
+    !trimmed.startsWith("<feed") &&
+    !trimmed.startsWith("<!DOCTYPE")
+  ) {
+    logger.warn("WaybackFetch", "Feed response does not look like XML", trimmed.substring(0, 200));
+    return null;
+  }
+
+  const firstFeed = await safeParseFeed(firstPageText);
+  if (!firstFeed) return null;
+
+  const firstItems = extractPostsFromFeed(firstFeed);
+  logger.info("WaybackFetch", `Page 1: ${firstItems.length} items`);
+
+  if (firstItems.length === 0) {
+    return {
+      title: firstFeed.title ?? "Unknown Blog",
+      description: firstFeed.description ?? null,
+      siteUrl: firstFeed.links?.[0]?.url ?? null,
+      items: [],
+    };
+  }
+
+  // Detect pagination type
+  let pagination = detectPaginatedFeed(feedUrl);
+
+  // If no pagination detected by URL, check feed content for Substack
+  if (!pagination && isSubstackFeedContent(firstPageText)) {
+    const base = feedUrl.split("?")[0];
+    pagination = { type: "substack", baseUrl: base };
+    logger.info("WaybackFetch", "Detected Substack feed from content");
+  }
+
+  const allItems: DiscoveredPost[] = [...firstItems];
+  const seenLinks = new Set(firstItems.map((p) => p.link));
+
+  if (pagination) {
+    logger.info("WaybackFetch", `Feed type: ${pagination.type}, will paginate`);
+
+    // Paginate through remaining pages
+    const MAX_PAGES = 100; // Safety limit
+    let page = 2;
+    let consecutiveEmpty = 0;
+
+    while (page <= MAX_PAGES && consecutiveEmpty < 2) {
+      const pageParam = pagination.type === "wordpress" ? "paged" : "page";
+      const separator = pagination.baseUrl.includes("?") ? "&" : "?";
+      const pageUrl = `${pagination.baseUrl}${separator}${pageParam}=${page}`;
+
+      logger.debug("WaybackFetch", `Fetching page ${page}: ${pageUrl}`);
+
+      onProgress?.({
+        phase: "metadata",
+        total: 0,
+        imported: allItems.length,
+        message: `Fetching feed page ${page}... (${allItems.length} posts found so far)`,
+      });
+
+      const pageResponse = await fetchWithRetry(pageUrl, 2);
+      if (!pageResponse) {
+        logger.info("WaybackFetch", `Page ${page} returned no response, stopping pagination`);
+        break;
+      }
+
+      try {
+        const pageText = await pageResponse.text();
+
+        // Check if we got a valid feed (not an HTML error page)
+        const pageTrimmed = pageText.trimStart();
+        if (
+          !pageTrimmed.startsWith("<?xml") &&
+          !pageTrimmed.startsWith("<rss") &&
+          !pageTrimmed.startsWith("<feed")
+        ) {
+          logger.info("WaybackFetch", `Page ${page} is not XML, stopping pagination`);
+          break;
+        }
+
+        const pageFeed = await safeParseFeed(pageText);
+        if (!pageFeed || !pageFeed.items || pageFeed.items.length === 0) {
+          logger.info("WaybackFetch", `Page ${page} has no items, stopping pagination`);
+          consecutiveEmpty++;
+          page++;
+          await sleep(500);
+          continue;
+        }
+
+        const pageItems = extractPostsFromFeed(pageFeed);
+        let newItems = 0;
+
+        for (const item of pageItems) {
+          if (item.link && !seenLinks.has(item.link)) {
+            seenLinks.add(item.link);
+            allItems.push(item);
+            newItems++;
+          }
+        }
+
+        logger.debug("WaybackFetch", `Page ${page}: ${pageItems.length} items, ${newItems} new`);
+
+        if (newItems === 0) {
+          consecutiveEmpty++;
+        } else {
+          consecutiveEmpty = 0;
+        }
+      } catch (err) {
+        logger.warn("WaybackFetch", `Page ${page} parse error`, err instanceof Error ? err.message : String(err));
+        consecutiveEmpty++;
+      }
+
+      page++;
+      await sleep(500); // Small delay between pages
+    }
+
+    logger.info("WaybackFetch", `Pagination complete: ${allItems.length} total posts from ${page - 1} pages`);
+  }
+
+  return {
+    title: firstFeed.title ?? "Unknown Blog",
+    description: firstFeed.description ?? null,
+    siteUrl: firstFeed.links?.[0]?.url ?? null,
+    items: allItems,
+  };
 }
 
 /**
@@ -211,18 +365,20 @@ export async function importFromWayback(
   // Normalize the URL (add protocol, upgrade to HTTPS)
   const normalizedUrl = normalizeFeedUrl(feedUrl);
 
+  logger.info("WaybackImport", `Starting import for: ${normalizedUrl}`);
+
   const blogId = generateId();
   const jobId = generateId();
   const now = new Date().toISOString();
 
-  // Step 1: Fetch current feed for metadata
+  // Step 1: Fetch current feed for metadata (with pagination support)
   onProgress?.({ phase: "metadata", total: 0, imported: 0, message: "Fetching current feed..." });
 
-  let currentFeed: Awaited<ReturnType<typeof fetchCurrentFeed>> = null;
+  let currentFeed: Awaited<ReturnType<typeof fetchPaginatedFeed>> = null;
   try {
-    currentFeed = await fetchCurrentFeed(normalizedUrl);
+    currentFeed = await fetchPaginatedFeed(normalizedUrl, onProgress);
   } catch (err) {
-    console.warn("[BlogLog] fetchCurrentFeed threw:", err);
+    logger.error("WaybackImport", "fetchPaginatedFeed threw", err instanceof Error ? err.message : String(err));
     throw new Error(
       "Could not fetch the RSS feed. Please check the URL and your internet connection."
     );
@@ -240,6 +396,8 @@ export async function importFromWayback(
     );
   }
 
+  logger.info("WaybackImport", `Feed "${currentFeed.title}": ${currentFeed.items.length} posts from live feed`);
+
   // Create blog entry
   try {
     await db.insert(blogs).values({
@@ -252,7 +410,7 @@ export async function importFromWayback(
       importSource: "wayback",
     });
   } catch (err) {
-    console.error("[BlogLog] Failed to insert blog:", err);
+    logger.error("WaybackImport", "Failed to insert blog", err instanceof Error ? err.message : String(err));
     throw new Error("Failed to save blog to database.");
   }
 
@@ -267,11 +425,10 @@ export async function importFromWayback(
       startedAt: now,
     });
   } catch (err) {
-    console.error("[BlogLog] Failed to create import job:", err);
-    // Non-fatal — continue without job tracking
+    logger.warn("WaybackImport", "Failed to create import job (non-fatal)", err instanceof Error ? err.message : String(err));
   }
 
-  // Step 2: Discover all posts from Wayback CDX
+  // Step 2: Discover additional posts from Wayback CDX
   onProgress?.({
     phase: "metadata",
     total: 0,
@@ -283,47 +440,65 @@ export async function importFromWayback(
   let snapshots: string[] = [];
   try {
     snapshots = await fetchCdxSnapshots(normalizedUrl);
+    logger.info("WaybackImport", `CDX returned ${snapshots.length} snapshots for ${normalizedUrl}`);
   } catch (err) {
-    console.warn("[BlogLog] CDX snapshot fetch failed:", err);
-    // Non-fatal — continue with just the current feed posts
+    logger.warn("WaybackImport", "CDX snapshot fetch failed (non-fatal)", err instanceof Error ? err.message : String(err));
   }
 
   const allPosts = new Map<string, DiscoveredPost>();
 
-  // Add current feed posts first
+  // Add current feed posts first (these are the most authoritative)
   for (const item of currentFeed.items) {
     if (item.link) {
       allPosts.set(item.link, item);
     }
   }
 
-  // Process each historical snapshot
+  // Process each historical snapshot to find older posts
   if (snapshots.length > 0) {
+    // Limit to at most 30 snapshots (spread evenly) to avoid rate limiting
+    let selectedSnapshots = snapshots;
+    if (snapshots.length > 30) {
+      const step = Math.floor(snapshots.length / 30);
+      selectedSnapshots = [];
+      for (let i = 0; i < snapshots.length; i += step) {
+        selectedSnapshots.push(snapshots[i]);
+      }
+      // Always include the oldest and newest
+      if (!selectedSnapshots.includes(snapshots[0])) selectedSnapshots.unshift(snapshots[0]);
+      if (!selectedSnapshots.includes(snapshots[snapshots.length - 1])) selectedSnapshots.push(snapshots[snapshots.length - 1]);
+      logger.info("WaybackImport", `Sampled ${selectedSnapshots.length} snapshots from ${snapshots.length}`);
+    }
+
     onProgress?.({
       phase: "metadata",
-      total: snapshots.length,
+      total: selectedSnapshots.length,
       imported: 0,
-      message: `Found ${snapshots.length} archived snapshots. Discovering posts...`,
+      message: `Found ${selectedSnapshots.length} archived snapshots. Discovering older posts...`,
     });
 
-    for (let i = 0; i < snapshots.length; i++) {
+    for (let i = 0; i < selectedSnapshots.length; i++) {
       try {
-        const posts = await fetchFeedSnapshot(normalizedUrl, snapshots[i]);
+        const posts = await fetchFeedSnapshot(normalizedUrl, selectedSnapshots[i]);
+        let newFromSnapshot = 0;
         for (const post of posts) {
           if (post.link && !allPosts.has(post.link)) {
             allPosts.set(post.link, post);
+            newFromSnapshot++;
           }
         }
+        if (newFromSnapshot > 0) {
+          logger.debug("WaybackImport", `Snapshot ${i + 1}: ${newFromSnapshot} new posts`);
+        }
       } catch (err) {
-        console.warn(`[BlogLog] Snapshot ${i} parse error:`, err);
-        // Continue with other snapshots
+        logger.warn("WaybackImport", `Snapshot ${i} parse error`, err instanceof Error ? err.message : String(err));
       }
 
       onProgress?.({
         phase: "metadata",
-        total: snapshots.length,
+        total: selectedSnapshots.length,
         imported: i + 1,
-        message: `Processed ${i + 1}/${snapshots.length} snapshots. Found ${allPosts.size} unique posts.`,
+        message: `Processed ${i + 1}/${selectedSnapshots.length} snapshots. Found ${allPosts.size} unique posts.`,
       });
 
       await sleep(RATE_LIMIT_MS);
@@ -336,6 +511,8 @@ export async function importFromWayback(
       message: `No Wayback snapshots found. Importing ${allPosts.size} posts from current feed...`,
     });
   }
+
+  logger.info("WaybackImport", `Total unique posts discovered: ${allPosts.size}`);
 
   // Step 3: Insert all discovered posts into the database
   const posts = Array.from(allPosts.values());
@@ -417,7 +594,7 @@ export async function importFromWayback(
       } catch {
         // Rollback failed — DB state might be inconsistent
       }
-      console.error("[BlogLog] Batch import error:", err);
+      logger.error("WaybackImport", "Batch import error", err instanceof Error ? err.message : String(err));
     }
 
     imported += batch.length;
@@ -451,8 +628,10 @@ export async function importFromWayback(
         totalWordCount: totalWords?.total ?? 0,
       })
       .where(eq(blogs.id, blogId));
+
+    logger.info("WaybackImport", `Blog "${currentFeed.title}" updated: ${countResult?.count ?? 0} articles, ${totalWords?.total ?? 0} words`);
   } catch (err) {
-    console.error("[BlogLog] Failed to update blog metadata:", err);
+    logger.error("WaybackImport", "Failed to update blog metadata", err instanceof Error ? err.message : String(err));
   }
 
   // Update import job
@@ -468,7 +647,7 @@ export async function importFromWayback(
       })
       .where(eq(importJobs.id, jobId));
   } catch (err) {
-    console.error("[BlogLog] Failed to update import job:", err);
+    logger.warn("WaybackImport", "Failed to update import job", err instanceof Error ? err.message : String(err));
   }
 
   onProgress?.({
@@ -477,6 +656,8 @@ export async function importFromWayback(
     imported,
     message: `Import complete! ${imported} articles imported.`,
   });
+
+  logger.info("WaybackImport", `Import complete for "${currentFeed.title}": ${imported} articles`);
 
   return blogId;
 }

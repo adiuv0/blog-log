@@ -6,9 +6,9 @@ import {
   StyleSheet,
   Pressable,
   useColorScheme,
+  FlatList,
 } from "react-native";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
-import { FlashList } from "@shopify/flash-list";
 import { useBlog } from "../../../hooks/useBlogs";
 import {
   useArticles,
@@ -224,11 +224,14 @@ export default function ArticleListScreen() {
         </View>
 
         {/* Article List */}
-        <FlashList
+        <FlatList
           data={articleList}
           renderItem={renderItem}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ padding: Spacing.md }}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           ListEmptyComponent={
             !isLoading ? (
               <View style={styles.emptyState}>
