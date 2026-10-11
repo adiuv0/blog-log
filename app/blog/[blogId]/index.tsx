@@ -45,13 +45,15 @@ function ArticleCard({
       ? colors.inProgress
       : colors.unread;
 
-  const dateStr = article.pubdate
-    ? new Date(article.pubdate).toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      })
-    : null;
+  const parsedDate = article.pubdate ? new Date(article.pubdate) : null;
+  const dateStr =
+    parsedDate && !Number.isNaN(parsedDate.getTime())
+      ? parsedDate.toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        })
+      : null;
 
   return (
     <Pressable
@@ -124,6 +126,18 @@ const FILTER_OPTIONS: { label: string; value: FilterStatus }[] = [
   { label: "Read", value: "read" },
 ];
 
+const SORT_OPTIONS: Array<{ field: SortField; label: string; defaultDirection: SortDirection }> = [
+  { field: "pubdate", label: "Date", defaultDirection: "desc" },
+  { field: "title", label: "Title", defaultDirection: "asc" },
+  { field: "reading_time_minutes", label: "Length", defaultDirection: "asc" },
+];
+
+function sortDirectionLabel(field: SortField, direction: SortDirection): string {
+  if (field === "title") return direction === "asc" ? "A\u2013Z" : "Z\u2013A";
+  if (field === "reading_time_minutes") return direction === "asc" ? "Shortest" : "Longest";
+  return direction === "asc" ? "Oldest" : "Newest";
+}
+
 export default function ArticleListScreen() {
   const { blogId } = useLocalSearchParams<{ blogId: string }>();
   const router = useRouter();
@@ -131,7 +145,7 @@ export default function ArticleListScreen() {
   const colors = Colors[colorScheme === "dark" ? "dark" : "light"];
 
   const [filter, setFilter] = useState<FilterStatus>("all");
-  const [sortField] = useState<SortField>("pubdate");
+  const [sortField, setSortField] = useState<SortField>("pubdate");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -215,10 +229,23 @@ export default function ArticleListScreen() {
 
           <Pressable
             style={[styles.sortButton, { borderColor: colors.border }]}
+            onPress={() => {
+              const next = SORT_OPTIONS[(SORT_OPTIONS.findIndex((o) => o.field === sortField) + 1) % SORT_OPTIONS.length];
+              setSortField(next.field);
+              setSortDirection(next.defaultDirection);
+            }}
+          >
+            <Text style={[styles.sortText, { color: colors.textSecondary }]}>
+              {SORT_OPTIONS.find((o) => o.field === sortField)?.label}
+            </Text>
+          </Pressable>
+
+          <Pressable
+            style={[styles.sortButton, { borderColor: colors.border, marginLeft: 0 }]}
             onPress={() => setSortDirection((d) => (d === "asc" ? "desc" : "asc"))}
           >
             <Text style={[styles.sortText, { color: colors.textSecondary }]}>
-              {sortDirection === "asc" ? "Oldest" : "Newest"}
+              {sortDirectionLabel(sortField, sortDirection)}
             </Text>
           </Pressable>
         </View>
@@ -262,6 +289,7 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.sm,
     gap: Spacing.xs,
     alignItems: "center",
+    flexWrap: "wrap",
   },
   filterChip: {
     paddingHorizontal: Spacing.sm,

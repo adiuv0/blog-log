@@ -11,6 +11,7 @@ import { importFromWayback } from "./wayback-fetcher";
 import { importFromHistory4Feed } from "./history4feed-api";
 import { importFromJsonFile } from "./json-import";
 import { generateId, type ImportProgress } from "./utils";
+import { feedKey } from "./normalize";
 
 export type ImportLogEntry = {
   timestamp: string;
@@ -79,15 +80,14 @@ class ImportManager {
 
   /**
    * Check if an import is already running for a given feed URL.
-   * Normalizes URLs by stripping protocol and trailing slashes for comparison.
+   * Compares the URL the job was started with (blogTitle changes once the
+   * feed title is known, so it can't be used here).
    */
   private isAlreadyImporting(feedUrl: string): string | null {
-    const normalize = (url: string) =>
-      url.toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
-    const target = normalize(feedUrl);
+    const target = feedKey(feedUrl);
 
     for (const job of this.jobs.values()) {
-      if (job.status === "running" && normalize(job.blogTitle) === target) {
+      if (job.status === "running" && feedKey(job.feedUrl) === target) {
         return job.jobId;
       }
     }
@@ -179,7 +179,7 @@ class ImportManager {
       jobId,
       blogId: null,
       blogTitle: displayName,
-      feedUrl: displayName, // will be overridden when blog title arrives
+      feedUrl: displayName, // stays fixed; blogTitle is replaced once known
       source,
       status: "running",
       phase: "metadata",

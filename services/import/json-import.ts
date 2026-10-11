@@ -1,8 +1,10 @@
 import * as FileSystem from "expo-file-system";
 import { db } from "../../db/client";
-import { blogs, articles, articleTags, importJobs } from "../../db/schema";
+import { importJobs } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { ReadingSpeed } from "../../constants/theme";
+import { findOrCreateBlog, refreshBlogStats } from "./blog-store";
+import { normalizePubdate } from "./normalize";
 import { generateId, stripHtml, countWords, type ProgressCallback } from "./utils";
 
 /**
@@ -53,7 +55,6 @@ export async function importFromJsonFile(
   fileUri: string,
   onProgress?: ProgressCallback
 ): Promise<string | null> {
-  const blogId = generateId();
   const jobId = generateId();
   const now = new Date().toISOString();
 
@@ -99,13 +100,11 @@ export async function importFromJsonFile(
     throw new Error("Unrecognized JSON format. Expected History4Feed or Blog Log export format.");
   }
 
-  await db.insert(blogs).values({
-    id: blogId,
+  const { blogId } = findOrCreateBlog({
     title: blogTitle,
     description: blogDescription,
     feedUrl,
     siteUrl,
-    importedAt: now,
     importSource: "json_file",
   });
 
@@ -132,6 +131,7 @@ export async function importFromJsonFile(
   for (let i = 0; i < posts.length; i += batchSize) {
     const batch = posts.slice(i, i + batchSize);
 
+    let insertedInBatch = 0;
     db.$client.execSync("BEGIN TRANSACTION");
     try {
       for (const post of batch) {
@@ -139,7 +139,7 @@ export async function importFromJsonFile(
         const contentText = post.contentText ?? (post.contentHtml ? stripHtml(post.contentHtml) : null);
         const words = contentText ? countWords(contentText) : 0;
 
-        db.$client.runSync(
+        const result = db.$client.runSync(
           `INSERT OR IGNORE INTO articles (id, blog_id, title, link, author, pubdate, content_html, content_text, word_count, reading_time_minutes, is_full_text, imported_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
@@ -148,7 +148,7 @@ export async function importFromJsonFile(
             post.title,
             post.link,
             post.author ?? null,
-            post.pubdate ?? null,
+            normalizePubdate(post.pubdate),
             post.contentHtml ?? null,
             contentText,
             words,
@@ -158,24 +158,19 @@ export async function importFromJsonFile(
           ]
         );
 
+        // Already in the library (same blog + link)
+        if (result.changes === 0) continue;
+        insertedInBatch++;
+
         for (const tag of post.categories ?? []) {
           db.$client.runSync(
-            `INSERT INTO article_tags (article_id, tag) VALUES (?, ?)`,
+            `INSERT OR IGNORE INTO article_tags (article_id, tag) VALUES (?, ?)`,
             [articleId, tag]
           );
         }
-
-        if (contentText) {
-          db.$client.runSync(
-            `INSERT INTO articles_fts (rowid, title, content_text)
-             SELECT rowid, title, content_text FROM articles WHERE id = ?`,
-            [articleId]
-          );
-        }
-
-        imported++;
       }
       db.$client.execSync("COMMIT");
+      imported += insertedInBatch;
     } catch (err) {
       db.$client.execSync("ROLLBACK");
       console.error("Batch import error:", err);
@@ -190,26 +185,7 @@ export async function importFromJsonFile(
   }
 
   // Update blog metadata
-  const countResult = db.$client.getFirstSync(
-    `SELECT COUNT(*) as count, MIN(pubdate) as earliest, MAX(pubdate) as latest
-     FROM articles WHERE blog_id = ?`,
-    [blogId]
-  ) as { count: number; earliest: string | null; latest: string | null } | null;
-
-  const totalWords = db.$client.getFirstSync(
-    `SELECT COALESCE(SUM(word_count), 0) as total FROM articles WHERE blog_id = ?`,
-    [blogId]
-  ) as { total: number } | null;
-
-  await db
-    .update(blogs)
-    .set({
-      postCount: countResult?.count ?? 0,
-      earliestDate: countResult?.earliest,
-      latestDate: countResult?.latest,
-      totalWordCount: totalWords?.total ?? 0,
-    })
-    .where(eq(blogs.id, blogId));
+  refreshBlogStats(blogId);
 
   await db
     .update(importJobs)

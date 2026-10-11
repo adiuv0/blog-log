@@ -89,17 +89,10 @@ export function useDeleteBlog() {
       logger.info("DeleteBlog", `Deleting blog ${blogId} and all associated data`);
 
       try {
-        // SQLite ON DELETE CASCADE should handle articles, article_tags,
-        // reading_progress, reading_sessions, article_embeddings, reading_queue.
-        // But also clean up FTS and import_jobs manually for safety.
-
-        // Delete FTS entries for articles in this blog
-        db.$client.runSync(
-          `DELETE FROM articles_fts WHERE rowid IN (
-            SELECT rowid FROM articles WHERE blog_id = ?
-          )`,
-          [blogId]
-        );
+        // SQLite ON DELETE CASCADE handles article_tags, reading_progress,
+        // reading_sessions, article_embeddings and reading_queue. Articles are
+        // deleted explicitly so the search-index triggers remove their entries.
+        db.$client.runSync(`DELETE FROM articles WHERE blog_id = ?`, [blogId]);
 
         // Delete import jobs
         db.$client.runSync(

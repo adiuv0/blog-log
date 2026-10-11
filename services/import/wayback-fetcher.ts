@@ -1,9 +1,11 @@
 import * as rssParser from "react-native-rss-parser";
 import { db } from "../../db/client";
-import { blogs, articles, articleTags, importJobs } from "../../db/schema";
+import { importJobs } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { ReadingSpeed } from "../../constants/theme";
 import { logger } from "../logger";
+import { findOrCreateBlog, refreshBlogStats } from "./blog-store";
+import { normalizePubdate } from "./normalize";
 import {
   generateId,
   stripHtml,
@@ -126,7 +128,7 @@ function extractPostsFromFeed(feed: rssParser.Feed): DiscoveredPost[] {
         return {
           title: (item.title ?? "Untitled").trim(),
           link: item.links?.[0]?.url ?? item.id ?? "",
-          pubdate: item.published ?? null,
+          pubdate: normalizePubdate(item.published),
           author: item.authors?.[0]?.name ?? null,
           categories:
             (item.categories
@@ -390,7 +392,6 @@ export async function importFromWayback(
 
   logger.info("WaybackImport", `Starting import for: ${normalizedUrl}`);
 
-  const blogId = generateId();
   const jobId = generateId();
   const now = new Date().toISOString();
 
@@ -421,17 +422,16 @@ export async function importFromWayback(
 
   logger.info("WaybackImport", `Feed "${currentFeed.title}": ${currentFeed.items.length} posts from live feed`);
 
-  // Create blog entry
+  // Create the blog, or reuse it if this feed was imported before
+  let blogId: string;
   try {
-    await db.insert(blogs).values({
-      id: blogId,
+    ({ blogId } = findOrCreateBlog({
       title: currentFeed.title,
       description: currentFeed.description,
       feedUrl: normalizedUrl,
       siteUrl: currentFeed.siteUrl,
-      importedAt: now,
       importSource: "wayback",
-    });
+    }));
   } catch (err) {
     logger.error("WaybackImport", "Failed to insert blog", err instanceof Error ? err.message : String(err));
     throw new Error("Failed to save blog to database.");
@@ -547,11 +547,13 @@ export async function importFromWayback(
   });
 
   let imported = 0;
+  let processed = 0;
   const batchSize = 50;
 
   for (let i = 0; i < posts.length; i += batchSize) {
     const batch = posts.slice(i, i + batchSize);
 
+    let insertedInBatch = 0;
     db.$client.execSync("BEGIN TRANSACTION");
     try {
       for (const post of batch) {
@@ -576,7 +578,7 @@ export async function importFromWayback(
           ? Math.max(1, Math.ceil(words / ReadingSpeed.wordsPerMinute))
           : 0; // 0 = unknown, don't display
 
-        db.$client.runSync(
+        const result = db.$client.runSync(
           `INSERT OR IGNORE INTO articles (id, blog_id, title, link, author, pubdate, content_text, word_count, reading_time_minutes, is_full_text, imported_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
@@ -594,6 +596,10 @@ export async function importFromWayback(
           ]
         );
 
+        // Already in the library (same blog + link): skip its tags too
+        if (result.changes === 0) continue;
+        insertedInBatch++;
+
         // Insert tags (each in its own try-catch so one bad tag doesn't kill the batch)
         for (const tag of post.categories) {
           try {
@@ -605,21 +611,10 @@ export async function importFromWayback(
             // Skip bad tag
           }
         }
-
-        // Populate FTS index
-        if (contentText) {
-          try {
-            db.$client.runSync(
-              `INSERT INTO articles_fts (rowid, title, content_text)
-               SELECT rowid, title, content_text FROM articles WHERE id = ?`,
-              [articleId]
-            );
-          } catch {
-            // FTS insert failure is non-fatal
-          }
-        }
+        // Search index is kept in sync by triggers (see db/migrations.ts)
       }
       db.$client.execSync("COMMIT");
+      imported += insertedInBatch;
     } catch (err) {
       try {
         db.$client.execSync("ROLLBACK");
@@ -629,39 +624,19 @@ export async function importFromWayback(
       logger.error("WaybackImport", "Batch import error", err instanceof Error ? err.message : String(err));
     }
 
-    imported += batch.length;
+    processed += batch.length;
     onProgress?.({
       phase: "metadata",
       total: posts.length,
-      imported,
-      message: `Imported ${imported}/${posts.length} articles.`,
+      imported: processed,
+      message: `Processed ${processed}/${posts.length} articles (${imported} new).`,
     });
   }
 
   // Update blog post count and date range
   try {
-    const countResult = db.$client.getFirstSync(
-      `SELECT COUNT(*) as count, MIN(pubdate) as earliest, MAX(pubdate) as latest
-       FROM articles WHERE blog_id = ?`,
-      [blogId]
-    ) as { count: number; earliest: string | null; latest: string | null } | null;
-
-    const totalWords = db.$client.getFirstSync(
-      `SELECT COALESCE(SUM(word_count), 0) as total FROM articles WHERE blog_id = ?`,
-      [blogId]
-    ) as { total: number } | null;
-
-    await db
-      .update(blogs)
-      .set({
-        postCount: countResult?.count ?? 0,
-        earliestDate: countResult?.earliest,
-        latestDate: countResult?.latest,
-        totalWordCount: totalWords?.total ?? 0,
-      })
-      .where(eq(blogs.id, blogId));
-
-    logger.info("WaybackImport", `Blog "${currentFeed.title}" updated: ${countResult?.count ?? 0} articles, ${totalWords?.total ?? 0} words`);
+    const { count } = refreshBlogStats(blogId);
+    logger.info("WaybackImport", `Blog "${currentFeed.title}" updated: ${count} articles`);
   } catch (err) {
     logger.error("WaybackImport", "Failed to update blog metadata", err instanceof Error ? err.message : String(err));
   }
@@ -686,7 +661,7 @@ export async function importFromWayback(
     phase: "metadata",
     total: posts.length,
     imported,
-    message: `Import complete! ${imported} articles imported.`,
+    message: `Import complete! ${imported} new articles (${posts.length - imported} already in your library).`,
   });
 
   logger.info("WaybackImport", `Import complete for "${currentFeed.title}": ${imported} articles`);

@@ -1,7 +1,9 @@
 import { db } from "../../db/client";
-import { blogs, articles, articleTags, importJobs } from "../../db/schema";
+import { importJobs } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { ReadingSpeed } from "../../constants/theme";
+import { findOrCreateBlog, refreshBlogStats } from "./blog-store";
+import { normalizePubdate } from "./normalize";
 import { generateId, stripHtml, countWords, type ProgressCallback } from "./utils";
 
 type H4FFeed = {
@@ -53,7 +55,6 @@ export async function importFromHistory4Feed(
   onProgress?: ProgressCallback
 ): Promise<string | null> {
   const normalizedBase = baseUrl.replace(/\/$/, "");
-  const blogId = generateId();
   const jobId = generateId();
   const now = new Date().toISOString();
 
@@ -64,12 +65,11 @@ export async function importFromHistory4Feed(
   if (!feedResponse.ok) throw new Error(`Failed to fetch feed: ${feedResponse.status}`);
   const feed: H4FFeed = await feedResponse.json();
 
-  await db.insert(blogs).values({
-    id: blogId,
+  const { blogId } = findOrCreateBlog({
     title: feed.title,
-    description: feed.description,
+    description: feed.description ?? null,
     feedUrl: feed.url,
-    importedAt: now,
+    siteUrl: null,
     importSource: "history4feed",
   });
 
@@ -107,6 +107,7 @@ export async function importFromHistory4Feed(
     totalPosts = data.count;
     nextUrl = data.next;
 
+    let insertedInBatch = 0;
     db.$client.execSync("BEGIN TRANSACTION");
     try {
       for (const post of data.results) {
@@ -115,7 +116,7 @@ export async function importFromHistory4Feed(
         const contentText = stripHtml(contentHtml);
         const words = countWords(contentText);
 
-        db.$client.runSync(
+        const result = db.$client.runSync(
           `INSERT OR IGNORE INTO articles (id, blog_id, title, link, author, pubdate, content_html, content_text, word_count, reading_time_minutes, is_full_text, imported_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
@@ -124,7 +125,7 @@ export async function importFromHistory4Feed(
             post.title,
             post.link,
             post.author,
-            post.pubdate,
+            normalizePubdate(post.pubdate),
             contentHtml,
             contentText,
             words,
@@ -134,24 +135,19 @@ export async function importFromHistory4Feed(
           ]
         );
 
+        // Already in the library (same blog + link)
+        if (result.changes === 0) continue;
+        insertedInBatch++;
+
         for (const tag of post.categories) {
           db.$client.runSync(
-            `INSERT INTO article_tags (article_id, tag) VALUES (?, ?)`,
+            `INSERT OR IGNORE INTO article_tags (article_id, tag) VALUES (?, ?)`,
             [articleId, tag]
           );
         }
-
-        if (contentText) {
-          db.$client.runSync(
-            `INSERT INTO articles_fts (rowid, title, content_text)
-             SELECT rowid, title, content_text FROM articles WHERE id = ?`,
-            [articleId]
-          );
-        }
-
-        imported++;
       }
       db.$client.execSync("COMMIT");
+      imported += insertedInBatch;
     } catch (err) {
       db.$client.execSync("ROLLBACK");
       console.error("Batch import error:", err);
@@ -168,26 +164,7 @@ export async function importFromHistory4Feed(
   }
 
   // Update blog metadata
-  const countResult = db.$client.getFirstSync(
-    `SELECT COUNT(*) as count, MIN(pubdate) as earliest, MAX(pubdate) as latest
-     FROM articles WHERE blog_id = ?`,
-    [blogId]
-  ) as { count: number; earliest: string | null; latest: string | null } | null;
-
-  const totalWords = db.$client.getFirstSync(
-    `SELECT COALESCE(SUM(word_count), 0) as total FROM articles WHERE blog_id = ?`,
-    [blogId]
-  ) as { total: number } | null;
-
-  await db
-    .update(blogs)
-    .set({
-      postCount: countResult?.count ?? 0,
-      earliestDate: countResult?.earliest,
-      latestDate: countResult?.latest,
-      totalWordCount: totalWords?.total ?? 0,
-    })
-    .where(eq(blogs.id, blogId));
+  refreshBlogStats(blogId);
 
   await db
     .update(importJobs)
