@@ -3,12 +3,13 @@ import { useState, useCallback } from "react";
 import * as Sharing from "expo-sharing";
 import { Colors, Spacing, FontSize } from "../../constants/theme";
 import { logger } from "../../services/logger";
+import { useSettings, useUpdateSetting } from "../../hooks/useSettings";
 
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme === "dark" ? "dark" : "light"];
-  const [offlineReader, setOfflineReader] = useState(false);
-  const [autoMarkRead, setAutoMarkRead] = useState(true);
+  const { data: settings } = useSettings();
+  const updateSetting = useUpdateSetting();
   const [logContent, setLogContent] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
 
@@ -72,24 +73,6 @@ export default function SettingsScreen() {
         <View style={styles.settingRow}>
           <View style={styles.settingInfo}>
             <Text style={[styles.settingLabel, { color: colors.text }]}>
-              Offline Reader
-            </Text>
-            <Text style={[styles.settingDesc, { color: colors.textSecondary }]}>
-              Save article content for offline reading. When enabled, articles can be read without internet. Off by default to respect blog authors.
-            </Text>
-          </View>
-          <Switch
-            value={offlineReader}
-            onValueChange={setOfflineReader}
-            trackColor={{ true: colors.primary }}
-          />
-        </View>
-
-        <View style={[styles.divider, { backgroundColor: colors.border }]} />
-
-        <View style={styles.settingRow}>
-          <View style={styles.settingInfo}>
-            <Text style={[styles.settingLabel, { color: colors.text }]}>
               Auto-Mark as Read
             </Text>
             <Text style={[styles.settingDesc, { color: colors.textSecondary }]}>
@@ -97,8 +80,8 @@ export default function SettingsScreen() {
             </Text>
           </View>
           <Switch
-            value={autoMarkRead}
-            onValueChange={setAutoMarkRead}
+            value={settings?.autoMarkRead ?? true}
+            onValueChange={(value) => updateSetting.mutate({ key: "autoMarkRead", value })}
             trackColor={{ true: colors.primary }}
           />
         </View>

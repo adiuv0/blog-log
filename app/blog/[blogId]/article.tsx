@@ -14,6 +14,7 @@ import {
   useStartReadingSession,
   useEndReadingSession,
 } from "../../../hooks/useReadingProgress";
+import { useSettings } from "../../../hooks/useSettings";
 import { ErrorBoundary } from "../../../components/ErrorBoundary";
 import { logger } from "../../../services/logger";
 import { Colors, Spacing, FontSize } from "../../../constants/theme";
@@ -40,6 +41,7 @@ function ArticleScreenInner() {
   const updateStatus = useUpdateReadingStatus();
   const startSession = useStartReadingSession();
   const endSession = useEndReadingSession();
+  const { data: settings } = useSettings();
 
   const sessionIdRef = useRef<number | null>(null);
   const hasStartedRef = useRef(false);
@@ -75,7 +77,7 @@ function ArticleScreenInner() {
     // Mark as in_progress — wrapped in try-catch to prevent crash
     try {
       updateStatus.mutate(
-        { articleId, status: "in_progress" },
+        { articleId, status: "in_progress", preserveRead: true },
         {
           onError: (err) => {
             logger.error("ArticleScreen", "Failed to update reading status", err instanceof Error ? err.message : String(err));
@@ -144,6 +146,15 @@ function ArticleScreenInner() {
     })();
     true;
   `;
+
+  // Auto-mark as read on reaching the bottom, when enabled in Settings
+  useEffect(() => {
+    if (hasReachedBottom && settings?.autoMarkRead && !isMarkedRead) {
+      logger.info("ArticleScreen", `Auto-marking ${articleId} as read`);
+      handleMarkAsRead();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasReachedBottom, settings?.autoMarkRead]);
 
   const handleMessage = (event: { nativeEvent: { data: string } }) => {
     if (event.nativeEvent.data === "REACHED_BOTTOM") {

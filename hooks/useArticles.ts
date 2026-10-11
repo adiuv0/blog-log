@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { db } from "../db/client";
 import { articles, readingProgress, articleTags } from "../db/schema";
 import { eq, sql, and, desc, asc } from "drizzle-orm";
+import { buildFtsQuery } from "../services/import/normalize";
 
 export type ReadingStatus = "unread" | "in_progress" | "read";
 
@@ -46,7 +47,9 @@ export function useArticles(
       let query: string;
       const params: (string | number | null)[] = [];
 
-      if (searchQuery && searchQuery.trim().length > 0) {
+      const ftsQuery = searchQuery ? buildFtsQuery(searchQuery) : null;
+
+      if (ftsQuery) {
         // FTS5 search
         query = `
           SELECT a.id, a.blog_id, a.title, a.link, a.author, a.pubdate,
@@ -57,7 +60,7 @@ export function useArticles(
           JOIN articles_fts fts ON fts.rowid = a.rowid
           WHERE a.blog_id = ? AND articles_fts MATCH ?
         `;
-        params.push(blogId, searchQuery.trim());
+        params.push(blogId, ftsQuery);
       } else {
         query = `
           SELECT a.id, a.blog_id, a.title, a.link, a.author, a.pubdate,

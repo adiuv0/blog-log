@@ -12,9 +12,12 @@ export function useUpdateReadingStatus() {
     mutationFn: async ({
       articleId,
       status,
+      preserveRead = false,
     }: {
       articleId: string;
       status: ReadingStatus;
+      /** Don't overwrite an article that is already marked read */
+      preserveRead?: boolean;
     }) => {
       logger.debug("ReadingProgress", `Updating status for ${articleId} to ${status}`);
       const now = new Date().toISOString();
@@ -26,7 +29,9 @@ export function useUpdateReadingStatus() {
           .where(eq(readingProgress.articleId, articleId))
           .get();
 
-        if (existing) {
+        if (existing && preserveRead && existing.status === "read") {
+          logger.debug("ReadingProgress", `${articleId} already read; keeping status`);
+        } else if (existing) {
           await db
             .update(readingProgress)
             .set({
